@@ -1,4 +1,5 @@
 from pathlib import Path
+import os
 
 from tts.generator import TTSGenerator
 
@@ -31,19 +32,23 @@ def build_tts_text(event, language):
     return f"{tag} {line}"
 
 
-def calculate_scheduled_starts(events):
-
+def calculate_scheduled_starts(events, provider=None):
+    provider = (provider or os.getenv("TTS_PROVIDER", "elevenlabs")).lower()
     starts = []
-
+    previous = 0.0
     for event in events:
-
-        cue = float(event["cue_seconds"])
-
-        starts.append(
-            max(0.0, cue)
-        )
-
+        peak = float(event.get("action_peak_seconds", event.get("cue_seconds", 0.0)))
+        lead = {"live": 0.10, "reaction": 0.02, "build_up": 0.35, "result": 0.0}.get(str(event.get("mode", "live")).lower(), 0.10)
+        start = max(0.0, peak - lead, previous)
+        starts.append(start)
+        previous = start
     return starts
+
+
+def _diagnostic(event, start, duration, window_end, provider):
+    peak = float(event.get("action_peak_seconds", event.get("cue_seconds", 0.0)))
+    return {"action_peak_seconds": peak, "scheduled_start_seconds": round(start, 3), "audio_duration_seconds": round(float(duration), 3), "window_end_seconds": round(window_end, 3), "provider": provider, "semantic_drift_seconds": round(start - peak, 3), "transport_drift_seconds": 0.0}
+
 
 
 class TTSService:
@@ -110,6 +115,7 @@ class TTSService:
                 )
 
                 start = scheduled_starts[index]
+                peak = float(event.get("action_peak_seconds", event.get("cue_seconds", start)))
 
                 if index + 1 < len(events):
                     end = (
@@ -122,16 +128,18 @@ class TTSService:
                     )
 
                 # Never give the merger an invalid window.
-                end = max(
-                    start + 0.25,
-                    end,
-                )
+                end = max(start + 0.25, min(end, float(event.get("end_seconds", end))))
+                if index + 1 < len(events):
+                    end = min(end, scheduled_starts[index + 1])
+                window_end = max(start + 0.25, end)
 
                 generated[language].append({
                     "path": str(output_path),
                     "start_seconds": start,
                     "end_seconds": end,
                     "duration": duration,
+                    "action_peak_seconds": peak,
+                    "diagnostics": _diagnostic(event, start, duration, window_end, generator.provider),
                 })
 
                 print(
