@@ -54,10 +54,6 @@ class PipelineService:
 
         events = commentary["events"]
 
-        summary = self.summary_builder.build_events(
-            events
-        )
-
         english = " ".join(
             event["english_tts"].strip()
             for event in events
@@ -110,6 +106,15 @@ class PipelineService:
             audio_segments = self.tts.generate(
                 events
             )
+
+        if audio_segments is not None:
+            by_id = {item.get("event_id"): item for item in audio_segments.get("english", [])}
+            for index, event in enumerate(events):
+                diagnostic = by_id.get(int(event.get("event_id", index)), {}).get("diagnostics")
+                if diagnostic:
+                    event.update(diagnostic)
+
+        summary = self.summary_builder.build_events(events)
 
         if ENABLE_VIDEO_MERGE:
 
