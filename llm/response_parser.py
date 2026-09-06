@@ -43,6 +43,11 @@ VALID_INTENSITIES = {
     "high",
 }
 
+VALID_MODES = {
+    "live", "reaction", "build_up", "result",
+}
+
+
 VALID_DELIVERIES = {
     "focused",
     "building",
@@ -266,6 +271,8 @@ def parse_analysis_response(
             continue
 
         start, end, cue = times
+        action_peak = max(start, min(end, float(event.get("action_peak_seconds", cue))))
+        commentary_start = max(start, min(end, float(event.get("commentary_start_seconds", cue))))
         description = str(event["description"]).strip()
 
         if not description:
@@ -278,6 +285,9 @@ def parse_analysis_response(
             "start_seconds": start,
             "end_seconds": end,
             "cue_seconds": cue,
+            "action_peak_seconds": action_peak,
+            "commentary_start_seconds": commentary_start,
+            "mode": _normalise_choice(event.get("mode"), VALID_MODES, "live"),
             "action_type": _normalise_choice(
                 event["action_type"],
                 VALID_ACTION_TYPES,
@@ -359,6 +369,8 @@ def parse_verification_response(
             continue
 
         start, end, cue = times
+        action_peak = max(start, min(end, float(merged.get("action_peak_seconds", cue))))
+        commentary_start = max(start, min(end, float(merged.get("commentary_start_seconds", cue))))
 
         action_type = _normalise_choice(
             merged.get("action_type"),
@@ -409,6 +421,9 @@ def parse_verification_response(
             "start_seconds": start,
             "end_seconds": end,
             "cue_seconds": cue,
+            "action_peak_seconds": action_peak,
+            "commentary_start_seconds": commentary_start,
+            "mode": _normalise_choice(merged.get("mode"), VALID_MODES, "live"),
             "action_type": action_type,
             "description": description,
             "ball_state": ball_state,
@@ -587,6 +602,7 @@ def parse_commentary_response(
                 VALID_INTENSITIES,
                 "low",
             ),
+            "mode": _normalise_choice(raw.get("mode", event.get("mode")), VALID_MODES, event.get("mode", "live")),
             "delivery": _normalise_choice(
                 raw.get("delivery"),
                 VALID_DELIVERIES,
