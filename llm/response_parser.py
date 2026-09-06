@@ -185,6 +185,14 @@ def _normalise_choice(value, allowed, default):
     return choice
 
 
+def _safe_float(value, fallback):
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return float(fallback)
+    return number if number == number else float(fallback)
+
+
 def _event_times(
     event,
     index,
@@ -271,8 +279,8 @@ def parse_analysis_response(
             continue
 
         start, end, cue = times
-        action_peak = max(start, min(end, float(event.get("action_peak_seconds", cue))))
-        commentary_start = max(start, min(end, float(event.get("commentary_start_seconds", cue))))
+        action_peak = max(start, min(end, _safe_float(event.get("action_peak_seconds"), cue)))
+        commentary_start = max(start, min(end, _safe_float(event.get("commentary_start_seconds"), cue)))
         description = str(event["description"]).strip()
 
         if not description:
@@ -369,8 +377,8 @@ def parse_verification_response(
             continue
 
         start, end, cue = times
-        action_peak = max(start, min(end, float(merged.get("action_peak_seconds", cue))))
-        commentary_start = max(start, min(end, float(merged.get("commentary_start_seconds", cue))))
+        action_peak = max(start, min(end, _safe_float(merged.get("action_peak_seconds"), cue)))
+        commentary_start = max(start, min(end, _safe_float(merged.get("commentary_start_seconds"), cue)))
 
         action_type = _normalise_choice(
             merged.get("action_type"),
