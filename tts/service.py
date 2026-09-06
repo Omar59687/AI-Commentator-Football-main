@@ -54,99 +54,28 @@ def _diagnostic(event, start, duration, window_end, provider):
 class TTSService:
 
     def generate(self, events):
-
         generator = TTSGenerator()
-
-        segment_directory = Path(
-            "media/output/commentary_segments"
-        )
-
-        segment_directory.mkdir(
-            parents=True,
-            exist_ok=True,
-        )
-
-        scheduled_starts = (
-            calculate_scheduled_starts(events)
-        )
-
-        generated = {
-            "english": [],
-            "arabic": [],
-        }
-
+        provider = generator.provider
+        directory = Path("media/output/commentary_segments")
+        directory.mkdir(parents=True, exist_ok=True)
+        generated = {"english": [], "arabic": []}
         for language in ("english", "arabic"):
-
-            plain_lines = [
-                event[f"{language}_tts"].strip()
-                for event in events
-            ]
-
+            lines = [event[f"{language}_tts"].strip() for event in events]
+            previous_end = 0.0
             for index, event in enumerate(events):
-
-                speech_text = build_tts_text(
-                    event,
-                    language,
-                )
-
-                previous_text = (
-                    plain_lines[index - 1]
-                    if index > 0
-                    else None
-                )
-
-                next_text = (
-                    plain_lines[index + 1]
-                    if index + 1 < len(events)
-                    else None
-                )
-
-                output_path = (
-                    segment_directory
-                    / f"{language}_{index:03d}.mp3"
-                )
-
-                duration = generator.generate(
-                    speech_text,
-                    str(output_path),
-                    language,
-                    previous_text=previous_text,
-                    next_text=next_text,
-                )
-
-                start = scheduled_starts[index]
-                peak = float(event.get("action_peak_seconds", event.get("cue_seconds", start)))
-
-                if index + 1 < len(events):
-                    end = (
-                        scheduled_starts[index + 1]
-                        - BETWEEN_LINES_SECONDS
-                    )
-                else:
-                    end = float(
-                        event["end_seconds"]
-                    )
-
-                # Never give the merger an invalid window.
-                end = max(start + 0.25, min(end, float(event.get("end_seconds", end))))
-                if index + 1 < len(events):
-                    end = min(end, scheduled_starts[index + 1])
-                window_end = max(start + 0.25, end)
-
-                generated[language].append({
-                    "path": str(output_path),
-                    "start_seconds": start,
-                    "end_seconds": end,
-                    "duration": duration,
-                    "action_peak_seconds": peak,
-                    "diagnostics": _diagnostic(event, start, duration, window_end, generator.provider),
-                })
-
-                print(
-                    f"{language} segment {index}: "
-                    f"cue={event['cue_seconds']:.2f}s, "
-                    f"play={start:.2f}s, "
-                    f"window_end={end:.2f}s"
-                )
-
+                limit = 14 if provider == "elevenlabs" and language == "english" else 12 if provider == "elevenlabs" else 10 if language == "english" else 9
+                if len(lines[index].split()) > limit:
+                    raise ValueError(f"{provider} {language} line {index} exceeds {limit} words")
+                peak = float(event.get("action_peak_seconds", event.get("cue_seconds", 0.0)))
+                start = max(0.0, float(event.get("commentary_start_seconds", peak)), previous_end)
+                next_peak = float(events[index + 1].get("action_peak_seconds", events[index + 1].get("cue_seconds", start + 1.0))) if index + 1 < len(events) else float(event.get("end_seconds", start + 1.0))
+                window_end = max(start + 0.01, min(float(event.get("end_seconds", next_peak)), next_peak))
+                output = directory / f"{language}_{index:03d}.mp3"
+                duration = generator.generate(build_tts_text(event, language), str(output), language, previous_text=lines[index - 1] if index else None, next_text=lines[index + 1] if index + 1 < len(events) else None)
+                if start + duration >= window_end:
+                    print(f"Omitting {language} segment {index}: audio crosses next event")
+                    continue
+                diagnostics = {"action_peak_seconds": peak, "scheduled_start_seconds": start, "audio_duration_seconds": duration, "window_end_seconds": window_end, "provider": provider, "semantic_drift_seconds": start - peak, "transport_drift_seconds": None}
+                generated[language].append({"path": str(output), "start_seconds": start, "end_seconds": start + duration, "duration": duration, "action_peak_seconds": peak, "diagnostics": diagnostics, "event_id": int(event.get("event_id", index))})
+                previous_end = start + duration
         return generated
