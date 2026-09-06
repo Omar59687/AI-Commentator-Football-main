@@ -1,4 +1,5 @@
 from pathlib import Path
+import shutil
 
 import ffmpeg
 import imageio_ffmpeg
@@ -178,6 +179,19 @@ class VideoMerger:
             parents=True,
             exist_ok=True,
         )
+
+        if not segments:
+            source = Path(video_path).resolve()
+            destination = Path(output_path).resolve()
+
+            if source != destination:
+                shutil.copyfile(source, destination)
+
+            print(
+                "No commentary segments fitted; "
+                "returning the original video."
+            )
+            return
 
         video_duration = get_video_duration(
             video_path
