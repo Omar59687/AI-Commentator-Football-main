@@ -94,27 +94,58 @@ class PipelineService:
             "media/output/arabic_tts_script.txt",
         )
 
+        audio_segments = None
+
+        if ENABLE_TTS:
+            audio_segments = self.tts.generate(events)
+
+            segments_by_language = {
+                language: {
+                    int(segment["event_id"]): segment
+                    for segment in audio_segments.get(
+                        language,
+                        [],
+                    )
+                }
+                for language in ("english", "arabic")
+            }
+
+            for index, event in enumerate(events):
+                event_id = int(
+                    event.get("event_id", index)
+                )
+                event["timing_diagnostics"] = {}
+
+                for language in ("english", "arabic"):
+                    segment = segments_by_language[
+                        language
+                    ].get(event_id)
+
+                    if segment is not None:
+                        event["timing_diagnostics"][
+                            language
+                        ] = segment["diagnostics"]
+
+                primary = (
+                    event["timing_diagnostics"].get(
+                        "english"
+                    )
+                    or event[
+                        "timing_diagnostics"
+                    ].get("arabic")
+                )
+
+                if primary is not None:
+                    event.update(primary)
+
+        summary = self.summary_builder.build_events(
+            events
+        )
+
         save_text(
             summary,
             "media/output/observations.txt",
         )
-
-        audio_segments = None
-
-        if ENABLE_TTS:
-
-            audio_segments = self.tts.generate(
-                events
-            )
-
-        if audio_segments is not None:
-            by_id = {item.get("event_id"): item for item in audio_segments.get("english", [])}
-            for index, event in enumerate(events):
-                diagnostic = by_id.get(int(event.get("event_id", index)), {}).get("diagnostics")
-                if diagnostic:
-                    event.update(diagnostic)
-
-        summary = self.summary_builder.build_events(events)
 
         if ENABLE_VIDEO_MERGE:
 
