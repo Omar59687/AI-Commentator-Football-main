@@ -35,7 +35,7 @@ class CommentaryGenerator:
     def __init__(
         self,
         api_key,
-        model="gemini-3.5-flash",
+        model="gemini-3.6-flash",
     ):
 
         if not api_key:
