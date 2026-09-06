@@ -64,9 +64,10 @@ TIMING
 
 - start_seconds is the beginning of the atomic action.
 - end_seconds is when that same action finishes.
-- cue_seconds is the earliest point when the neutral description is visually
-  true in full.
-- cue_seconds must be between start_seconds and end_seconds.
+- action_peak_seconds is the visible peak when the primary action is unmistakably happening.
+- action_peak_seconds must be between start_seconds and end_seconds.
+- commentary_start_seconds is a proposed audio start near the action peak and may be adjusted by the scheduler.
+- cue_seconds remains a backward-compatible alias for action_peak_seconds.
 - Normally leave at least 2.5 seconds between cues.
 - Use timestamps in 0.5-second increments.
 - Do not put a cue in the final 1.5 seconds.
@@ -92,6 +93,8 @@ Return only valid JSON:
       "start_seconds": 0.0,
       "end_seconds": 2.5,
       "cue_seconds": 0.5,
+      "action_peak_seconds": 0.5,
+      "commentary_start_seconds": 0.5,
       "action_type": "{action_types}",
       "description": "One neutral objective visible action",
       "ball_state": "controlled|loose|in_flight|not_visible",
@@ -194,7 +197,10 @@ Return only valid JSON:
         for event in verified_events:
             public_events.append({
                 "event_id": event["event_id"],
-                "cue_seconds": event["cue_seconds"],
+                "cue_seconds": event.get("cue_seconds", event.get("action_peak_seconds", 0.0)),
+                "action_peak_seconds": event.get("action_peak_seconds", event.get("cue_seconds", 0.0)),
+                "commentary_start_seconds": event.get("commentary_start_seconds", event.get("cue_seconds", 0.0)),
+                "mode": event.get("mode", "live"),
                 "action_type": event["action_type"],
                 "description": event["description"],
                 "ball_state": event["ball_state"],
@@ -228,6 +234,8 @@ VERIFIED EVENTS
 
 FACTUAL RULES
 
+- Each event has exactly one primary action. Put that action in the opening words before context or reaction; never narrate an outcome before evidence.
+- Use only the verified description, action_type, ball_state, and possession facts.
 - Each line must describe only that event's verified description and action.
 - Do not add names, numbers, club names, positions, score, fouls, shots, saves,
   goals, or danger unless the verified description explicitly contains it.
@@ -252,8 +260,9 @@ STYLE
 - Avoid robotic filler such as "continues possession", "looks to build",
   "assesses the options", "controls the tempo", and "moves the ball well".
 - Do not reuse the same sentence opening in consecutive events.
-- English: 3 to 8 spoken words, one short sentence.
-- Arabic: 3 to 7 spoken words, one natural short sentence.
+- English: 3 to 8 spoken words in live/reaction; up to 10 in build_up/result.
+- Arabic: 3 to 7 spoken words in live/reaction; up to 9 in build_up/result.
+- Provider-aware targets: Edge <= 10 English / <= 9 Arabic; ElevenLabs <= 14 English / <= 12 Arabic. Never exceed the event window.
 - English and Arabic must express the same fact and intensity.
 - Focused delivery for routine control or backward play; building for verified
   forward movement; excited only for genuine visible danger; shouting only for
@@ -278,6 +287,7 @@ Return only valid JSON:
       "english_neutral_tts": "Same action without team identity",
       "arabic_neutral_tts": "نفس الحدث دون هوية الفريق",
       "intensity": "low|medium|high",
+      "mode": "live|reaction|build_up|result",
       "delivery": "focused|building|excited|shouting"
     }}
   ]
