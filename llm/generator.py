@@ -48,7 +48,7 @@ class CommentaryGenerator:
 
         fallback_setting = os.getenv(
             "GEMINI_FALLBACK_MODELS",
-            "gemini-2.5-flash",
+            "gemini-3.6-flash",
         )
 
         self.fallback_models = [
@@ -275,10 +275,19 @@ class CommentaryGenerator:
 
             except errors.APIError as exc:
 
+                status_code = self._status_code(exc)
+                last_error = exc
+
+                if status_code == 404:
+                    print(
+                        f"{model} is not available; "
+                        "trying the next configured model."
+                    )
+                    continue
+
                 if not self._is_retryable_api_error(exc):
                     raise
 
-                last_error = exc
                 print(f"{model} is temporarily unavailable.")
 
             except (
