@@ -275,6 +275,10 @@ class TTSService:
                     ),
                 })
 
-                previous_end = window_end
+                rendered_duration = min(
+                    duration,
+                    available,
+                )
+                previous_end = start + rendered_duration
 
         return generated
