@@ -1,0 +1,24 @@
+version: 1
+
+defaults:
+  mode: economy
+  max_delegated_agents: 2
+  repair_cycles: 1
+  allow_nested_delegation: false
+  allow_external_providers: false
+
+models:
+  chair: { preferred: inherit, effort: inherit }
+  builder: { preferred: gpt-5.6-luna, effort: medium }
+  reviewer: { preferred: gpt-5.6-terra, effort: high }
+  tester: { preferred: gpt-5.6-luna, effort: medium }
+  scout: { preferred: gpt-5.6-luna, effort: low }
+
+roles:
+  - name: security-reviewer
+    enabled: auto
+    objective: Find exploitable security and privacy failures.
+    preferred_model: gpt-5.6-terra
+    effort: high
+    access: read-only
+    triggers: [auth, secrets, payments, permissions]

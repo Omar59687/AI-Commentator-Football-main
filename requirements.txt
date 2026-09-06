@@ -1,0 +1,14 @@
+ultralytics
+supervision
+opencv-python
+numpy
+fastapi
+uvicorn
+sqlalchemy
+python-multipart
+ffmpeg-python
+imageio-ffmpeg
+google-genai
+elevenlabs
+edge-tts
+python-dotenv

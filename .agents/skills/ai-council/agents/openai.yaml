@@ -1,0 +1,7 @@
+interface:
+  display_name: "AI Council"
+  short_description: "Coordinate independent agents with adaptive budgets"
+  default_prompt: "Use $ai-council in economy mode to implement and independently verify this task."
+
+policy:
+  allow_implicit_invocation: false
