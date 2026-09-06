@@ -25,6 +25,11 @@ class SummaryBuilder:
             action_peak = float(event.get("action_peak_seconds", cue))
             scheduled_start = float(event.get("scheduled_start_seconds", event.get("commentary_start_seconds", cue)))
             mode = str(event.get("mode", "live"))
+            provider = str(event.get("provider", "unavailable"))
+            duration = event.get("audio_duration_seconds")
+            window_end = event.get("window_end_seconds")
+            semantic_drift = event.get("semantic_drift_seconds")
+            transport_drift = event.get("transport_drift_seconds")
 
             description = str(
                 event.get(
@@ -99,7 +104,8 @@ class SummaryBuilder:
                 f"Event {event_id:02d} | "
                 f"{start:05.1f}s-{end:05.1f}s "
                 f"(commentary cue {cue:05.1f}s, action peak {action_peak:05.1f}s, "
-                f"scheduled start {scheduled_start:05.1f}s, mode={mode}) "
+                f"scheduled start {scheduled_start:05.1f}s, mode={mode}, provider={provider}, "
+                f"audio={duration}, window={window_end}, semantic drift={semantic_drift}, transport drift={transport_drift}) "
                 f"[{intensity}] "
                 f"[action={action_type}, ball={ball_state}] "
                 f"[possession={possession}, "
