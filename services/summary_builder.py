@@ -21,9 +21,10 @@ class SummaryBuilder:
                 event.get("end_seconds", start)
             )
 
-            cue = float(
-                event.get("cue_seconds", start)
-            )
+            cue = float(event.get("cue_seconds", start))
+            action_peak = float(event.get("action_peak_seconds", cue))
+            scheduled_start = float(event.get("scheduled_start_seconds", event.get("commentary_start_seconds", cue)))
+            mode = str(event.get("mode", "live"))
 
             description = str(
                 event.get(
@@ -97,7 +98,8 @@ class SummaryBuilder:
             lines.append(
                 f"Event {event_id:02d} | "
                 f"{start:05.1f}s-{end:05.1f}s "
-                f"(commentary cue {cue:05.1f}s) "
+                f"(commentary cue {cue:05.1f}s, action peak {action_peak:05.1f}s, "
+                f"scheduled start {scheduled_start:05.1f}s, mode={mode}) "
                 f"[{intensity}] "
                 f"[action={action_type}, ball={ball_state}] "
                 f"[possession={possession}, "
