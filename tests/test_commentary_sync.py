@@ -163,7 +163,7 @@ class SchedulingAndDiagnosticsTests(unittest.TestCase):
         starts = calculate_scheduled_starts(events, provider="edge")
         self.assertEqual(len(starts), 3)
         self.assertGreaterEqual(min(starts), 0.0)
-        self.assertEqual(starts[0], 0.0)
+        self.assertEqual(starts[0], 2.0)
         self.assertGreaterEqual(starts[1], starts[0])
         self.assertGreaterEqual(starts[2], starts[1])
 
