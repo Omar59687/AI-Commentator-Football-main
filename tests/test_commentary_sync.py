@@ -128,7 +128,11 @@ class ParserTimingAndModeTests(unittest.TestCase):
         self.assertEqual(event["mode"], "result")
 
         omitted = parse_verification_response(
-            json.dumps({"events": []}),
+            json.dumps({
+                "events": [{
+                    "event_id": 999,
+                }]
+            }),
             [analysis_event()],
         )["events"][0]
         self.assertEqual(omitted["possession_team"], "unclear")
