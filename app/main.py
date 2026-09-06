@@ -17,7 +17,7 @@ def main():
 
         model=os.getenv(
             "GEMINI_MODEL",
-            "gemini-3.5-flash"
+            "gemini-3.6-flash"
         )
 
     )
