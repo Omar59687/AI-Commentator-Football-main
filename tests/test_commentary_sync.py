@@ -91,6 +91,17 @@ class ParserTimingAndModeTests(unittest.TestCase):
         }))
         self.assertEqual(result["events"][0]["mode"], "live")
 
+    def test_malformed_new_timestamp_strings_use_safe_fallback(self):
+        result = parse_analysis_response(json.dumps({
+            "events": [analysis_event(
+                action_peak_seconds="not-a-number",
+                commentary_start_seconds="NaN",
+            )]
+        }))
+        event = result["events"][0]
+        self.assertEqual(event["action_peak_seconds"], 3.0)
+        self.assertEqual(event["commentary_start_seconds"], 3.0)
+
     def test_verification_clamps_new_timing_fields_and_preserves_legacy_draft(self):
         draft = [analysis_event()]
         result = parse_verification_response(json.dumps({
@@ -129,7 +140,7 @@ class ParserTimingAndModeTests(unittest.TestCase):
             json.dumps({"events": [writer_event(mode="not-a-mode")]}),
             verified,
         )
-        self.assertEqual(result["events"][0]["mode"], "live")
+        self.assertEqual(result["events"][0]["mode"], "reaction")
 
         result = parse_commentary_response(
             json.dumps({"events": [writer_event(mode="build_up")]}),
@@ -152,43 +163,54 @@ class SchedulingAndDiagnosticsTests(unittest.TestCase):
         self.assertGreaterEqual(starts[1], starts[0])
         self.assertGreaterEqual(starts[2], starts[1])
 
-    def test_tts_windows_stay_valid_for_close_events_offline(self):
+    def test_edge_word_limit_and_close_event_skip_are_deterministic(self):
         class FakeGenerator:
             provider = "edge"
 
             def generate(self, *args, **kwargs):
-                return 0.4
+                return 0.5
+
+        too_long = verified_event(
+            english_tts="one two three four five six seven eight nine ten eleven",
+            arabic_tts="واحد اثنان ثلاثة",
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            old = Path.cwd()
+            os.chdir(directory)
+            try:
+                with patch("tts.service.TTSGenerator", FakeGenerator):
+                    with self.assertRaisesRegex(ValueError, "exceeds 10 words"):
+                        TTSService().generate([too_long])
+            finally:
+                os.chdir(old)
 
         events = [
             verified_event(
-                start_seconds=0.0, end_seconds=0.35,
-                action_peak_seconds=0.02, cue_seconds=0.02,
-                english_tts="One.", arabic_tts="واحد.",
+                start_seconds=0.0, end_seconds=2.0,
+                action_peak_seconds=1.0, commentary_start_seconds=1.0,
+                english_tts="One line.", arabic_tts="سطر واحد.",
             ),
             verified_event(
-                event_id=1, start_seconds=0.1, end_seconds=0.3,
-                action_peak_seconds=0.1, cue_seconds=0.1,
-                english_tts="Two.", arabic_tts="اثنان.",
+                event_id=1, start_seconds=1.0, end_seconds=3.0,
+                action_peak_seconds=1.1, commentary_start_seconds=1.1,
+                english_tts="Two line.", arabic_tts="سطران.",
             ),
         ]
         with tempfile.TemporaryDirectory() as directory:
-            with patch.dict(os.environ, {"TTS_PROVIDER": "edge"}):
+            old = Path.cwd()
+            os.chdir(directory)
+            try:
                 with patch("tts.service.TTSGenerator", FakeGenerator):
-                    with patch("tts.service.Path", Path):
-                        old = Path.cwd()
-                        os.chdir(directory)
-                        try:
-                            generated = TTSService().generate(events)
-                        finally:
-                            os.chdir(old)
+                    generated = TTSService().generate(events)
+            finally:
+                os.chdir(old)
 
         for language_segments in generated.values():
-            for segment in language_segments:
-                self.assertGreaterEqual(segment["start_seconds"], 0.0)
-                self.assertGreaterEqual(
-                    segment["end_seconds"],
-                    segment["start_seconds"] + 0.25,
-                )
+            self.assertEqual(len(language_segments), 1)
+            segment = language_segments[0]
+            self.assertGreaterEqual(segment["start_seconds"], 0.0)
+            self.assertGreaterEqual(segment["end_seconds"], segment["start_seconds"])
+            self.assertIsNone(segment["diagnostics"]["transport_drift_seconds"])
 
     def test_diagnostics_and_summary_expose_grounding_and_drift(self):
         event = verified_event(action_peak_seconds=4.25)
@@ -201,13 +223,23 @@ class SchedulingAndDiagnosticsTests(unittest.TestCase):
         self.assertEqual(diagnostics["audio_duration_seconds"], 1.2)
         self.assertEqual(diagnostics["window_end_seconds"], 5.1)
         self.assertEqual(diagnostics["semantic_drift_seconds"], -0.35)
+        self.assertIsNone(diagnostics["transport_drift_seconds"])
         self.assertIn("provider", diagnostics)
-        summary = SummaryBuilder().build_events([dict(
-            event,
-            scheduled_start_seconds=3.9,
-        )])
+
+        enriched = dict(event, **{
+            "scheduled_start_seconds": 3.9,
+            "provider": "edge",
+            "audio_duration_seconds": 1.2,
+            "window_end_seconds": 5.1,
+            "semantic_drift_seconds": -0.35,
+            "transport_drift_seconds": None,
+        })
+        summary = SummaryBuilder().build_events([enriched])
         self.assertIn("action peak 004.2s", summary)
         self.assertIn("scheduled start 003.9s", summary)
+        self.assertIn("provider=edge", summary)
+        self.assertIn("audio=1.2", summary)
+        self.assertIn("transport drift=None", summary)
 
 
 class PromptContractTests(unittest.TestCase):
