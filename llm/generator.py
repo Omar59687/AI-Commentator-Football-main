@@ -309,6 +309,7 @@ class CommentaryGenerator:
         purpose,
         temperature,
         visual=False,
+        response_validator=None,
     ):
 
         last_error = None
@@ -331,9 +332,22 @@ class CommentaryGenerator:
                             visual=visual,
                         ),
                     )
+                    response_text = response.text
+                    if response_validator is not None:
+                        try:
+                            response_validator(response_text)
+                        except (TypeError, ValueError, KeyError) as exc:
+                            last_error = exc
+                            print(
+                                f"{model} returned an invalid {purpose} response; "
+                                "retrying within the configured limit."
+                            )
+                            if attempt < MAX_MODEL_ATTEMPTS:
+                                self._wait_before_retry(attempt)
+                            continue
 
                     print(f"{purpose} succeeded with {model}.")
-                    return response.text, model
+                    return response_text, model
 
                 except errors.APIError as exc:
 
@@ -359,8 +373,8 @@ class CommentaryGenerator:
             print(f"{model} exhausted its bounded retry budget.")
 
         raise RuntimeError(
-            "Every configured Gemini model is currently "
-            "unavailable after bounded retries. Please try again shortly."
+            "Every configured Gemini model failed to produce a usable response "
+            "after bounded retries. Please try again shortly."
         ) from last_error
 
     def _video_part(self, uploaded_video):
@@ -484,6 +498,11 @@ class CommentaryGenerator:
             purpose="Fact-checking actions and possession",
             temperature=0.0,
             visual=True,
+            response_validator=lambda text: parse_verification_response(
+                text,
+                draft_events=draft_events,
+                duration_seconds=duration_seconds,
+            ),
         )
         events = parse_verification_response(
             response_text,

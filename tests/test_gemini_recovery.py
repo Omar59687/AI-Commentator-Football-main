@@ -188,6 +188,53 @@ class StageCacheTests(unittest.TestCase):
 
 class GeminiSuccessfulContinuationTests(unittest.TestCase):
 
+    def test_invalid_verification_response_retries_before_accepting_result(self):
+
+        from google.genai import types
+        from llm.response_parser import parse_verification_response
+
+        draft_events = [{
+            "event_id": 0,
+            "start_seconds": 1.0,
+            "end_seconds": 3.0,
+            "cue_seconds": 1.5,
+            "action_type": "back_pass",
+            "description": "A player releases a backward pass.",
+            "ball_state": "controlled",
+            "action_confidence": "high",
+        }]
+        verification = {
+            "events": [{
+                **draft_events[0],
+                "possession_team": "unclear",
+                "possession_confidence": "low",
+                "evidence_notes": "The shirt is unclear.",
+            }]
+        }
+        generator = make_generator([
+            SimpleNamespace(text="[]"),
+            SimpleNamespace(text=json.dumps(verification)),
+        ])
+        generator.prompt_builder = VideoCommentaryPrompt()
+
+        with patch("llm.generator.time.sleep") as sleep:
+            events, model, response_text = generator._verify_events(
+                video_part=types.Part(text="video"),
+                draft_events=draft_events,
+                evidence=[],
+                duration_seconds=5.0,
+            )
+
+        self.assertEqual(model, "primary")
+        self.assertEqual(response_text, json.dumps(verification))
+        self.assertEqual(events[0]["event_id"], 0)
+        self.assertEqual(events[0]["possession_team"], "unclear")
+        self.assertEqual(
+            generator.client.models.generate_content.call_count,
+            2,
+        )
+        sleep.assert_called_once_with(0.5)
+
     def test_retry_recovers_verification_then_cached_result_continues(self):
 
         analysis = {
