@@ -1,4 +1,5 @@
 import json
+import math
 import re
 
 
@@ -126,27 +127,20 @@ FALLBACK_LINES = {
 }
 
 
-def _load_json(text):
-
+def _load_json(text, allow_event_array=False):
     if not text or not str(text).strip():
         raise ValueError(
             "Gemini returned an empty JSON response."
         )
 
     cleaned = str(text).strip()
-
     cleaned = re.sub(
         r"^```(?:json)?\s*",
         "",
         cleaned,
         flags=re.IGNORECASE,
     )
-
-    cleaned = re.sub(
-        r"\s*```$",
-        "",
-        cleaned,
-    )
+    cleaned = re.sub(r"\s*```$", "", cleaned)
 
     try:
         result = json.loads(cleaned)
@@ -155,12 +149,17 @@ def _load_json(text):
             "Gemini did not return valid JSON."
         ) from exc
 
-    if not isinstance(result, dict):
-        raise ValueError(
-            "Gemini response must be a JSON object."
-        )
-
-    events = result.get("events")
+    if isinstance(result, list) and allow_event_array:
+        events = result
+    elif isinstance(result, dict):
+        if allow_event_array and set(result) != {"events"}:
+            raise ValueError(
+                "Verification response object must contain only the 'events' key."
+            )
+        events = result.get("events")
+    else:
+        expected = "a JSON object or verification event array" if allow_event_array else "a JSON object"
+        raise ValueError(f"Gemini response must be {expected}.")
 
     if not isinstance(events, list) or not events:
         raise ValueError(
@@ -169,6 +168,44 @@ def _load_json(text):
 
     return events
 
+
+def verification_response_diagnostics(text, error):
+    """Return safe structural diagnostics without including response content."""
+    try:
+        cleaned = str(text or "").strip()
+        cleaned = re.sub(
+            r"^```(?:json)?\s*",
+            "",
+            cleaned,
+            flags=re.IGNORECASE,
+        )
+        cleaned = re.sub(r"\s*```$", "", cleaned)
+        payload = json.loads(cleaned)
+    except (TypeError, ValueError):
+        payload = None
+
+    if isinstance(payload, dict):
+        response_type = "object"
+        keys = sorted(str(key)[:64] for key in payload)[:10]
+        events = payload.get("events")
+        event_count = len(events) if isinstance(events, list) else "unknown"
+    elif isinstance(payload, list):
+        response_type = "array"
+        keys = []
+        event_count = len(payload)
+    elif payload is None:
+        response_type = "invalid_json"
+        keys = []
+        event_count = "unknown"
+    else:
+        response_type = type(payload).__name__
+        keys = []
+        event_count = "unknown"
+
+    return (
+        f"type={response_type}, keys={keys}, event_count={event_count}, "
+        f"parser_error={type(error).__name__}: {error}"
+    )
 
 def _normalise_choice(value, allowed, default):
 
@@ -315,7 +352,7 @@ def parse_verification_response(
     duration_seconds=None,
 ):
 
-    raw_events = _load_json(text)
+    raw_events = _load_json(text, allow_event_array=True)
 
     expected_ids = []
     for draft in draft_events:
@@ -358,6 +395,68 @@ def parse_verification_response(
             "Verifier omitted event IDs: "
             + ", ".join(str(event_id) for event_id in missing_ids)
         )
+
+    required_fields = {
+        "event_id",
+        "start_seconds",
+        "end_seconds",
+        "cue_seconds",
+        "action_type",
+        "description",
+        "ball_state",
+        "action_confidence",
+        "possession_team",
+        "possession_confidence",
+        "evidence_notes",
+    }
+    choice_fields = {
+        "action_type": VALID_ACTION_TYPES,
+        "ball_state": VALID_BALL_STATES,
+        "action_confidence": VALID_CONFIDENCE_LEVELS,
+        "possession_team": VALID_POSSESSION_TEAMS,
+        "possession_confidence": VALID_CONFIDENCE_LEVELS,
+    }
+    for index, raw in enumerate(raw_events):
+        missing_fields = sorted(required_fields.difference(raw))
+        if missing_fields:
+            raise ValueError(
+                f"Verification event {index} is incomplete; missing fields: "
+                + ", ".join(missing_fields)
+            )
+
+        unexpected_fields = sorted(set(raw).difference(required_fields))
+        if unexpected_fields:
+            raise ValueError(
+                f"Verification event {index} contains unsupported fields: "
+                + ", ".join(str(field) for field in unexpected_fields)
+            )
+
+        for field in ("start_seconds", "end_seconds", "cue_seconds"):
+            value = raw[field]
+            if (
+                isinstance(value, bool)
+                or not isinstance(value, (int, float))
+                or not math.isfinite(float(value))
+            ):
+                raise ValueError(
+                    f"Verification event {index} has an invalid {field}."
+                )
+
+        for field in ("description", "evidence_notes"):
+            if not isinstance(raw[field], str) or not raw[field].strip():
+                raise ValueError(
+                    f"Verification event {index} has an empty or invalid {field}."
+                )
+
+        for field, allowed in choice_fields.items():
+            value = raw[field]
+            if (
+                not isinstance(value, str)
+                or value.strip().lower() not in allowed
+            ):
+                raise ValueError(
+                    f"Verification event {index} has an invalid {field}."
+                )
 
     verified = []
 

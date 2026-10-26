@@ -6,7 +6,15 @@ import unittest
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
-from llm.generator import CommentaryGenerator, MAX_MODEL_ATTEMPTS
+from llm.generator import (
+    CommentaryGenerator,
+    MAX_MODEL_ATTEMPTS,
+    VERIFICATION_RESPONSE_SCHEMA,
+)
+from llm.response_parser import (
+    parse_verification_response,
+    verification_response_diagnostics,
+)
 from llm.stage_cache import StageCache
 from llm.video_prompt import VideoCommentaryPrompt
 
@@ -106,6 +114,105 @@ class GeminiRetryTests(unittest.TestCase):
         self.assertEqual(sleep.call_count, attempts - 2)
 
 
+class GeminiVerificationResponseTests(unittest.TestCase):
+
+    def setUp(self):
+        self.draft = [{
+            "event_id": 7,
+            "start_seconds": 1.0,
+            "end_seconds": 3.0,
+            "cue_seconds": 1.5,
+            "action_type": "back_pass",
+            "description": "A player releases a backward pass.",
+            "ball_state": "controlled",
+            "action_confidence": "high",
+        }]
+        self.verified = {
+            **self.draft[0],
+            "action_type": "pass_release",
+            "description": "A player plays the ball backward.",
+            "possession_team": "unclear",
+            "possession_confidence": "low",
+            "evidence_notes": "The shirt cannot be identified clearly.",
+        }
+
+    def test_accepts_complete_top_level_verification_array(self):
+        result = parse_verification_response(
+            json.dumps([self.verified]),
+            draft_events=self.draft,
+        )
+        self.assertEqual(result["events"][0]["event_id"], 7)
+        self.assertEqual(
+            result["events"][0]["description"],
+            "A player plays the ball backward.",
+        )
+
+    def test_rejects_incomplete_top_level_verification_array(self):
+        incomplete = dict(self.verified)
+        incomplete.pop("evidence_notes")
+        with self.assertRaisesRegex(ValueError, "missing fields: evidence_notes"):
+            parse_verification_response(
+                json.dumps([incomplete]),
+                draft_events=self.draft,
+            )
+
+    def test_top_level_array_still_requires_exact_event_coverage(self):
+        drafts = [self.draft[0], {**self.draft[0], "event_id": 8}]
+        with self.assertRaisesRegex(ValueError, "omitted event IDs: 8"):
+            parse_verification_response(
+                json.dumps([self.verified]),
+                draft_events=drafts,
+            )
+
+    def test_verification_object_rejects_ununderstood_wrapper_keys(self):
+        with self.assertRaisesRegex(ValueError, "only the 'events' key"):
+            parse_verification_response(
+                json.dumps({"events": [self.verified], "result": "ok"}),
+                draft_events=self.draft,
+            )
+ 
+    def test_rejects_invalid_verified_action_instead_of_using_draft(self):
+        invalid = dict(self.verified)
+        invalid["action_type"] = "unknown_action"
+        with self.assertRaisesRegex(ValueError, "invalid action_type"):
+            parse_verification_response(
+                json.dumps([invalid]),
+                draft_events=self.draft,
+            )
+
+    def test_rejects_unsupported_fields_in_verification_event(self):
+        extra = {**self.verified, "unreviewed_claim": "ignored"}
+        with self.assertRaisesRegex(ValueError, "unsupported fields"):
+            parse_verification_response(
+                json.dumps([extra]),
+                draft_events=self.draft,
+            )
+
+    def test_verification_config_requests_structured_schema(self):
+        generator = CommentaryGenerator.__new__(CommentaryGenerator)
+        with patch("llm.generator.types.GenerateContentConfig") as factory:
+            generator._json_config(
+                temperature=0.0,
+                response_schema=VERIFICATION_RESPONSE_SCHEMA,
+            )
+        self.assertIs(
+            factory.call_args.kwargs["response_schema"],
+            VERIFICATION_RESPONSE_SCHEMA,
+        )
+
+    def test_diagnostics_report_shape_without_raw_response_values(self):
+        error = ValueError("Verification event 0 is incomplete.")
+        diagnostic = verification_response_diagnostics(
+            '{"events":[{"event_id":7,"private":"do not print"}]}',
+            error,
+        )
+        self.assertIn("type=object", diagnostic)
+        self.assertIn("keys=['events']", diagnostic)
+        self.assertIn("event_count=1", diagnostic)
+        self.assertIn("Verification event 0 is incomplete.", diagnostic)
+        self.assertNotIn("do not print", diagnostic)
+
+
 class StageCacheTests(unittest.TestCase):
 
     def test_reuses_matching_stage_and_rejects_prompt_or_video_changes(self):
@@ -203,14 +310,12 @@ class GeminiSuccessfulContinuationTests(unittest.TestCase):
             "ball_state": "controlled",
             "action_confidence": "high",
         }]
-        verification = {
-            "events": [{
-                **draft_events[0],
-                "possession_team": "unclear",
-                "possession_confidence": "low",
-                "evidence_notes": "The shirt is unclear.",
-            }]
-        }
+        verification = [{
+            **draft_events[0],
+            "possession_team": "unclear",
+            "possession_confidence": "low",
+            "evidence_notes": "The shirt is unclear.",
+        }]
         generator = make_generator([
             SimpleNamespace(text="[]"),
             SimpleNamespace(text=json.dumps(verification)),
@@ -249,14 +354,13 @@ class GeminiSuccessfulContinuationTests(unittest.TestCase):
                 "action_confidence": "high",
             }]
         }
-        verification = {
-            "events": [{
-                **analysis["events"][0],
-                "possession_team": "unclear",
-                "possession_confidence": "low",
-                "evidence_notes": "The shirt is unclear.",
-            }]
-        }
+        # Gemini may return the equivalent top-level array representation.
+        verification = [{
+            **analysis["events"][0],
+            "possession_team": "unclear",
+            "possession_confidence": "low",
+            "evidence_notes": "The shirt is unclear.",
+        }]
         commentary = {
             "events": [{
                 "event_id": 0,
@@ -333,6 +437,29 @@ class GeminiSuccessfulContinuationTests(unittest.TestCase):
             generator.client.files.delete.assert_not_called()
             self.assertEqual(generator.client.files.upload.call_count, 1)
 
+            # A malformed cached result must be rejected and regenerated.
+            cached = StageCache(
+                video_path,
+                identity=generator._cache_identity("analysis prompt", 5.0),
+                cache_dir=directory,
+            )
+            evidence = evidence_build.return_value
+            verification_context = {
+                "prompt": generator.prompt_builder.build_verification(
+                    analysis["events"]
+                ),
+                "evidence_digest": generator._evidence_digest(evidence),
+                "temperature": 0.0,
+                "visual": True,
+                "response_schema_version": 1,
+                "parser_version": 2,
+            }
+            cached.set_stage(
+                "verification",
+                verification_context,
+                {"model": "primary", "response_text": '{"events":[]}'},
+            )
+
             result = generator.generate_from_video(
                 video_path,
                 "analysis prompt",
@@ -345,6 +472,13 @@ class GeminiSuccessfulContinuationTests(unittest.TestCase):
             self.assertEqual(
                 model_call.call_count,
                 1 + MAX_MODEL_ATTEMPTS * 2 + 2,
+            )
+            verification_config = model_call.call_args_list[
+                1 + MAX_MODEL_ATTEMPTS * 2
+            ].kwargs["config"]
+            self.assertEqual(
+                verification_config.response_schema,
+                VERIFICATION_RESPONSE_SCHEMA,
             )
             generator.client.files.get.assert_called_once_with(
                 name="files/video-1"

@@ -15,6 +15,7 @@ from llm.response_parser import (
     parse_analysis_response,
     parse_commentary_response,
     parse_verification_response,
+    verification_response_diagnostics,
 )
 from llm.video_prompt import VideoCommentaryPrompt
 from vision.possession_verifier import (
@@ -35,6 +36,58 @@ RETRYABLE_CODES = {
 MAX_MODEL_ATTEMPTS = 3
 UPLOAD_CACHE_MAX_AGE_SECONDS = 20 * 60 * 60
 STAGE_CACHE_SCHEMA_VERSION = 1
+
+VERIFICATION_RESPONSE_SCHEMA = {
+    "type": "OBJECT",
+    "properties": {
+        "events": {
+            "type": "ARRAY",
+            "items": {
+                "type": "OBJECT",
+                "properties": {
+                    "event_id": {"type": "INTEGER"},
+                    "start_seconds": {"type": "NUMBER"},
+                    "end_seconds": {"type": "NUMBER"},
+                    "cue_seconds": {"type": "NUMBER"},
+                    "action_type": {
+                        "type": "STRING",
+                        "enum": [
+                            "carry", "pass_release", "reception", "back_pass",
+                            "long_ball", "challenge", "clearance", "cross",
+                            "shot", "save", "restart", "movement", "unclear",
+                        ],
+                    },
+                    "description": {"type": "STRING"},
+                    "ball_state": {
+                        "type": "STRING",
+                        "enum": ["controlled", "loose", "in_flight", "not_visible"],
+                    },
+                    "action_confidence": {
+                        "type": "STRING",
+                        "enum": ["low", "medium", "high"],
+                    },
+                    "possession_team": {
+                        "type": "STRING",
+                        "enum": ["white", "green", "unclear"],
+                    },
+                    "possession_confidence": {
+                        "type": "STRING",
+                        "enum": ["low", "medium", "high"],
+                    },
+                    "evidence_notes": {"type": "STRING"},
+                },
+                "required": [
+                    "event_id", "start_seconds", "end_seconds", "cue_seconds",
+                    "action_type", "description", "ball_state",
+                    "action_confidence", "possession_team",
+                    "possession_confidence", "evidence_notes",
+                ],
+            },
+        },
+    },
+    "required": ["events"],
+}
+VERIFICATION_RESPONSE_SCHEMA_VERSION = 1
 
 
 class CommentaryGenerator:
@@ -286,12 +339,16 @@ class CommentaryGenerator:
         self,
         temperature,
         visual=False,
+        response_schema=None,
     ):
 
         config_values = {
             "response_mime_type": "application/json",
             "temperature": float(temperature),
         }
+
+        if response_schema is not None:
+            config_values["response_schema"] = response_schema
 
         if visual:
             config_values["media_resolution"] = (
@@ -310,6 +367,7 @@ class CommentaryGenerator:
         temperature,
         visual=False,
         response_validator=None,
+        response_schema=None,
     ):
 
         last_error = None
@@ -330,6 +388,7 @@ class CommentaryGenerator:
                         config=self._json_config(
                             temperature=temperature,
                             visual=visual,
+                            response_schema=response_schema,
                         ),
                     )
                     response_text = response.text
@@ -340,7 +399,11 @@ class CommentaryGenerator:
                             last_error = exc
                             print(
                                 f"{model} returned an invalid {purpose} response; "
-                                "retrying within the configured limit."
+                                + verification_response_diagnostics(
+                                    response_text,
+                                    exc,
+                                )
+                                + ". Retrying within the configured limit."
                             )
                             if attempt < MAX_MODEL_ATTEMPTS:
                                 self._wait_before_retry(attempt)
@@ -498,6 +561,7 @@ class CommentaryGenerator:
             purpose="Fact-checking actions and possession",
             temperature=0.0,
             visual=True,
+            response_schema=VERIFICATION_RESPONSE_SCHEMA,
             response_validator=lambda text: parse_verification_response(
                 text,
                 draft_events=draft_events,
@@ -855,6 +919,8 @@ class CommentaryGenerator:
                 "evidence_digest": evidence_digest,
                 "temperature": 0.0,
                 "visual": True,
+                "response_schema_version": VERIFICATION_RESPONSE_SCHEMA_VERSION,
+                "parser_version": 2,
             }
             cached_verification = self._cached_response(
                 cache,
@@ -889,7 +955,14 @@ class CommentaryGenerator:
                         draft_events=draft_events,
                         duration_seconds=duration_seconds,
                     )["events"]
-                except (TypeError, ValueError, KeyError):
+                except (TypeError, ValueError, KeyError) as exc:
+                    print(
+                        "Cached Gemini verification response rejected: "
+                        + verification_response_diagnostics(
+                            verification_text,
+                            exc,
+                        )
+                    )
                     cache.clear_stage("verification")
                     if uploaded_video is None:
                         uploaded_video = self._get_or_upload_video(cache, video_path)

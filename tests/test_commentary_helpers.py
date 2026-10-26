@@ -145,7 +145,12 @@ class VerificationParserTests(unittest.TestCase):
 
     def test_preserves_corrected_verified_event(self):
         draft = [make_analysis_event(event_id=0)]
-        corrected = make_analysis_event(event_id=0, action_type="shot", description="A shot is taken.", ball_state="in_flight", possession_team="white", possession_confidence="high")
+        corrected = make_analysis_event(event_id=0, action_type="shot", description="A shot is taken.", ball_state="in_flight")
+        corrected.update({
+            "possession_team": "white",
+            "possession_confidence": "high",
+            "evidence_notes": "The ball is travelling after the shot.",
+        })
         result = parse_verification_response(json.dumps({"events": [corrected]}), draft)["events"][0]
         self.assertEqual(result["action_type"], "shot")
         self.assertEqual(result["description"], "A shot is taken.")
