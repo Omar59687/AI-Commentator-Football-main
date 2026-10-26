@@ -116,6 +116,42 @@ class AnalysisParserTests(unittest.TestCase):
 
 class VerificationParserTests(unittest.TestCase):
 
+
+    def test_rejects_missing_verification_event(self):
+        draft = [make_analysis_event(event_id=0), make_analysis_event(event_id=1)]
+        with self.assertRaisesRegex(ValueError, "omitted event IDs: 1"):
+            parse_verification_response(json.dumps({"events": [make_analysis_event(event_id=0)]}), draft)
+
+    def test_rejects_duplicate_verification_event_id(self):
+        draft = [make_analysis_event(event_id=0)]
+        with self.assertRaisesRegex(ValueError, "duplicate event ID 0"):
+            parse_verification_response(json.dumps({"events": [make_analysis_event(event_id=0), make_analysis_event(event_id=0)]}), draft)
+
+    def test_rejects_malformed_verification_event_id(self):
+        draft = [make_analysis_event(event_id=0)]
+        malformed = make_analysis_event(event_id="0")
+        with self.assertRaisesRegex(ValueError, "integer event ID"):
+            parse_verification_response(json.dumps({"events": [malformed]}), draft)
+
+    def test_rejects_non_object_verification_event(self):
+        draft = [make_analysis_event(event_id=0)]
+        with self.assertRaisesRegex(ValueError, "must be an object"):
+            parse_verification_response(json.dumps({"events": [None]}), draft)
+
+    def test_rejects_unexpected_verification_event_id(self):
+        draft = [make_analysis_event(event_id=0)]
+        with self.assertRaisesRegex(ValueError, "unexpected event ID 2"):
+            parse_verification_response(json.dumps({"events": [make_analysis_event(event_id=0), make_analysis_event(event_id=2)]}), draft)
+
+    def test_preserves_corrected_verified_event(self):
+        draft = [make_analysis_event(event_id=0)]
+        corrected = make_analysis_event(event_id=0, action_type="shot", description="A shot is taken.", ball_state="in_flight", possession_team="white", possession_confidence="high")
+        result = parse_verification_response(json.dumps({"events": [corrected]}), draft)["events"][0]
+        self.assertEqual(result["action_type"], "shot")
+        self.assertEqual(result["description"], "A shot is taken.")
+        self.assertEqual(result["possession_team"], "unclear")
+        self.assertEqual(result["possession_confidence"], "low")
+
     def test_removes_possession_from_travelling_ball(self):
 
         draft = [make_analysis_event()]

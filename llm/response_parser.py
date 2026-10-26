@@ -317,14 +317,47 @@ def parse_verification_response(
 
     raw_events = _load_json(text)
 
+    expected_ids = []
+    for draft in draft_events:
+        if not isinstance(draft, dict):
+            raise ValueError("Draft events must be objects with event IDs.")
+        event_id = draft.get("event_id")
+        if type(event_id) is not int:
+            raise ValueError("Draft event IDs must be integers.")
+        expected_ids.append(event_id)
+
+    if len(expected_ids) != len(set(expected_ids)):
+        raise ValueError("Draft events contain duplicate event IDs.")
+
     raw_by_id = {}
 
-    for raw in raw_events:
-        if isinstance(raw, dict):
-            try:
-                raw_by_id[int(raw["event_id"])] = raw
-            except (KeyError, TypeError, ValueError):
-                continue
+    for index, raw in enumerate(raw_events):
+        if not isinstance(raw, dict):
+            raise ValueError(
+                f"Verification event {index} must be an object with an event ID."
+            )
+
+        event_id = raw.get("event_id")
+        if type(event_id) is not int:
+            raise ValueError(
+                f"Verification event {index} must have an integer event ID."
+            )
+        if event_id not in expected_ids:
+            raise ValueError(
+                f"Verifier returned unexpected event ID {event_id}."
+            )
+        if event_id in raw_by_id:
+            raise ValueError(
+                f"Verifier returned duplicate event ID {event_id}."
+            )
+        raw_by_id[event_id] = raw
+
+    missing_ids = [event_id for event_id in expected_ids if event_id not in raw_by_id]
+    if missing_ids:
+        raise ValueError(
+            "Verifier omitted event IDs: "
+            + ", ".join(str(event_id) for event_id in missing_ids)
+        )
 
     verified = []
 
