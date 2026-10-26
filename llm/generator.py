@@ -1,12 +1,16 @@
+import base64
+import hashlib
 import os
 import random
 import time
+from types import SimpleNamespace
 
 import httpx
 from google import genai
 from google.genai import errors, types
 
 from llm.evidence_builder import EventEvidenceBuilder
+from llm.stage_cache import StageCache
 from llm.response_parser import (
     parse_analysis_response,
     parse_commentary_response,
@@ -28,6 +32,9 @@ RETRYABLE_CODES = {
     503,
     504,
 }
+MAX_MODEL_ATTEMPTS = 3
+UPLOAD_CACHE_MAX_AGE_SECONDS = 20 * 60 * 60
+STAGE_CACHE_SCHEMA_VERSION = 1
 
 
 class CommentaryGenerator:
@@ -43,7 +50,13 @@ class CommentaryGenerator:
                 "GEMINI_API_KEY is missing from .env."
             )
 
-        self.client = genai.Client(api_key=api_key)
+        # Disable SDK retries so this module owns a bounded total request budget.
+        self.client = genai.Client(
+            api_key=api_key,
+            http_options=types.HttpOptions(
+                retry_options=types.HttpRetryOptions(attempts=1)
+            ),
+        )
         self.model = model
 
         fallback_setting = os.getenv(
@@ -110,19 +123,44 @@ class CommentaryGenerator:
 
     def _wait_before_retry(self, attempt):
 
-        delay = min(30, 2 ** attempt)
-        delay += random.uniform(0.0, 1.0)
-
-        print(
-            f"Waiting {delay:.1f} seconds before retrying..."
+        base_delay = min(8.0, 0.5 * (2 ** max(0, attempt - 1)))
+        delay = base_delay + random.uniform(
+            0.0,
+            min(1.0, base_delay * 0.25),
         )
 
+        print(f"Waiting {delay:.1f} seconds before retrying...")
         time.sleep(delay)
+
+    def _is_transient_failure(self, error):
+
+        current = error
+        seen = set()
+
+        while current is not None and id(current) not in seen:
+            seen.add(id(current))
+
+            if isinstance(current, errors.APIError):
+                if self._is_retryable_api_error(current):
+                    return True
+            elif isinstance(
+                current,
+                (
+                    httpx.TransportError,
+                    TimeoutError,
+                    ConnectionError,
+                ),
+            ):
+                return True
+
+            current = getattr(current, "__cause__", None)
+
+        return False
 
     def _upload_video(
         self,
         video_path,
-        attempts=5,
+        attempts=MAX_MODEL_ATTEMPTS,
     ):
 
         last_error = None
@@ -188,6 +226,7 @@ class CommentaryGenerator:
 
         deadline = time.monotonic() + timeout_seconds
         current = uploaded_video
+        status_failures = 0
 
         while time.monotonic() < deadline:
 
@@ -211,14 +250,32 @@ class CommentaryGenerator:
                 current = self.client.files.get(
                     name=current.name
                 )
+            except errors.APIError as exc:
+                if not self._is_retryable_api_error(exc):
+                    raise
+                status_failures += 1
+                if status_failures >= MAX_MODEL_ATTEMPTS:
+                    raise RuntimeError(
+                        "Gemini upload status remained unavailable after "
+                        "bounded retries."
+                    ) from exc
+                self._wait_before_retry(status_failures)
+                continue
             except (
                 httpx.TransportError,
                 TimeoutError,
                 ConnectionError,
-            ):
-                print(
-                    "Status check was interrupted; trying again..."
-                )
+            ) as exc:
+                status_failures += 1
+                if status_failures >= MAX_MODEL_ATTEMPTS:
+                    raise RuntimeError(
+                        "Gemini upload status remained unavailable after "
+                        "bounded retries."
+                    ) from exc
+                self._wait_before_retry(status_failures)
+                continue
+            else:
+                status_failures = 0
 
         raise TimeoutError(
             "Gemini did not finish processing the "
@@ -258,42 +315,52 @@ class CommentaryGenerator:
 
         for model in self._models_to_try():
 
-            try:
-                print(f"{purpose} with {model}...")
+            for attempt in range(1, MAX_MODEL_ATTEMPTS + 1):
 
-                response = self.client.models.generate_content(
-                    model=model,
-                    contents=content,
-                    config=self._json_config(
-                        temperature=temperature,
-                        visual=visual,
-                    ),
-                )
+                try:
+                    print(
+                        f"{purpose} with {model} "
+                        f"(attempt {attempt}/{MAX_MODEL_ATTEMPTS})..."
+                    )
 
-                print(f"{purpose} succeeded with {model}.")
-                return response.text
+                    response = self.client.models.generate_content(
+                        model=model,
+                        contents=content,
+                        config=self._json_config(
+                            temperature=temperature,
+                            visual=visual,
+                        ),
+                    )
 
-            except errors.APIError as exc:
+                    print(f"{purpose} succeeded with {model}.")
+                    return response.text, model
 
-                if not self._is_retryable_api_error(exc):
-                    raise
+                except errors.APIError as exc:
 
-                last_error = exc
-                print(f"{model} is temporarily unavailable.")
+                    if not self._is_retryable_api_error(exc):
+                        raise
 
-            except (
-                httpx.TransportError,
-                TimeoutError,
-                ConnectionError,
-            ) as exc:
-                last_error = exc
-                print(
-                    f"The connection to {model} was interrupted."
-                )
+                    last_error = exc
+
+                except (
+                    httpx.TransportError,
+                    TimeoutError,
+                    ConnectionError,
+                ) as exc:
+                    last_error = exc
+
+                if attempt < MAX_MODEL_ATTEMPTS:
+                    print(
+                        f"{model} had a transient Gemini failure; "
+                        "retrying within the configured limit."
+                    )
+                    self._wait_before_retry(attempt)
+
+            print(f"{model} exhausted its bounded retry budget.")
 
         raise RuntimeError(
             "Every configured Gemini model is currently "
-            "unavailable. Please try again shortly."
+            "unavailable after bounded retries. Please try again shortly."
         ) from last_error
 
     def _video_part(self, uploaded_video):
@@ -328,17 +395,17 @@ class CommentaryGenerator:
             ],
         )
 
-        response_text = self._generate_json_with_fallback(
+        response_text, model = self._generate_json_with_fallback(
             content,
             purpose="Extracting neutral football actions",
             temperature=0.0,
             visual=True,
         )
-
-        return parse_analysis_response(
+        events = parse_analysis_response(
             response_text,
             duration_seconds=duration_seconds,
         )["events"]
+        return events, model, response_text
 
     def _local_possession_signals(self, evidence):
 
@@ -369,7 +436,7 @@ class CommentaryGenerator:
             print(
                 "Warning: local possession verification failed. "
                 "Team colours will not be spoken without "
-                f"independent agreement. Details: {exc}"
+                f"independent agreement ({type(exc).__name__})."
             )
             return []
 
@@ -412,18 +479,18 @@ class CommentaryGenerator:
             parts=parts,
         )
 
-        response_text = self._generate_json_with_fallback(
+        response_text, model = self._generate_json_with_fallback(
             content,
             purpose="Fact-checking actions and possession",
             temperature=0.0,
             visual=True,
         )
-
-        return parse_verification_response(
+        events = parse_verification_response(
             response_text,
             draft_events=draft_events,
             duration_seconds=duration_seconds,
         )["events"]
+        return events, model, response_text
 
     def _write_commentary(
         self,
@@ -435,18 +502,18 @@ class CommentaryGenerator:
             verified_events
         )
 
-        response_text = self._generate_json_with_fallback(
+        response_text, model = self._generate_json_with_fallback(
             prompt,
             purpose="Writing grounded bilingual commentary",
             temperature=0.35,
             visual=False,
         )
-
-        return parse_commentary_response(
+        result = parse_commentary_response(
             response_text,
             verified_events=verified_events,
             duration_seconds=duration_seconds,
         )
+        return result, model, response_text
 
     def generate(self, prompt):
 
@@ -456,6 +523,197 @@ class CommentaryGenerator:
         )
 
         return response.text
+
+    def _cache_identity(self, prompt, duration_seconds):
+
+        enabled = os.getenv(
+            "ENABLE_LOCAL_POSSESSION_VERIFIER",
+            "true",
+        ).strip().lower() not in {"0", "false", "no", "off"}
+
+        return {
+            "schema_version": STAGE_CACHE_SCHEMA_VERSION,
+            "models": self._models_to_try(),
+            "duration_seconds": float(duration_seconds),
+            "analysis_prompt": prompt,
+            "video_fps": os.getenv("GEMINI_VIDEO_FPS", "8"),
+            "json_config": {
+                "analysis_temperature": 0.0,
+                "verification_temperature": 0.0,
+                "commentary_temperature": 0.35,
+                "visual_media_resolution": "high",
+                "response_mime_type": "application/json",
+                "sdk_retry_attempts": 1,
+                "outer_attempts_per_model": MAX_MODEL_ATTEMPTS,
+            },
+            "evidence_builder": {
+                "cell_width": self.evidence_builder.cell_width,
+                "jpeg_quality": self.evidence_builder.jpeg_quality,
+            },
+            "local_verifier": {
+                "enabled": enabled,
+                "image_size": getattr(self.local_verifier, "image_size", None),
+                "version": 1,
+            },
+            "max_team_mentions": int(
+                os.getenv("MAX_TEAM_MENTIONS", "4")
+            ),
+            "parser_version": 1,
+        }
+
+    def _serialize_evidence(self, evidence):
+
+        return [
+            {
+                "event_id": int(item["event_id"]),
+                "cue_seconds": float(item["cue_seconds"]),
+                "timestamps": [
+                    float(value) for value in item["timestamps"]
+                ],
+                "jpeg_base64": base64.b64encode(
+                    item["jpeg_bytes"]
+                ).decode("ascii"),
+            }
+            for item in evidence
+        ]
+
+    def _restore_evidence(self, cached):
+
+        if not isinstance(cached, list):
+            raise ValueError("Cached evidence must be a list.")
+
+        restored = []
+        for item in cached:
+            if not isinstance(item, dict):
+                raise ValueError("Cached evidence item is malformed.")
+            encoded = item.get("jpeg_base64")
+            if not isinstance(encoded, str):
+                raise ValueError("Cached evidence image is missing.")
+            restored.append({
+                "event_id": int(item["event_id"]),
+                "cue_seconds": float(item["cue_seconds"]),
+                "timestamps": [
+                    float(value) for value in item["timestamps"]
+                ],
+                "jpeg_bytes": base64.b64decode(encoded, validate=True),
+            })
+
+        return restored
+
+    def _evidence_digest(self, evidence):
+
+        digest = hashlib.sha256()
+        for item in evidence:
+            digest.update(str(int(item["event_id"])).encode("ascii"))
+            digest.update(b"\\0")
+            digest.update(item["jpeg_bytes"])
+            digest.update(b"\\0")
+        return digest.hexdigest()
+
+    def _cached_response(self, cache, stage, context):
+
+        value = cache.get_stage(stage, context)
+        if not isinstance(value, dict):
+            return None
+
+        model = value.get("model")
+        response_text = value.get("response_text")
+        if (
+            model not in self._models_to_try()
+            or not isinstance(response_text, str)
+            or not response_text.strip()
+        ):
+            return None
+
+        return response_text, model
+
+    def _delete_uploaded_video(self, uploaded_video):
+
+        name = getattr(uploaded_video, "name", None)
+        if not name:
+            return True
+
+        try:
+            self.client.files.delete(name=name)
+            return True
+        except errors.APIError as exc:
+            if self._status_code(exc) == 404:
+                return True
+            print(
+                "Warning: could not delete Gemini upload "
+                f"({type(exc).__name__})."
+            )
+            return False
+        except Exception as exc:
+            # Provider exception text may contain request metadata; keep logs safe.
+            print(
+                "Warning: could not delete Gemini upload "
+                f"({type(exc).__name__})."
+            )
+            return False
+
+    def _get_or_upload_video(self, cache):
+
+        saved = cache.get_upload()
+        if saved:
+            age = time.time() - float(saved.get("saved_at", 0.0))
+            if age >= 0 and age < UPLOAD_CACHE_MAX_AGE_SECONDS:
+                try:
+                    existing = self.client.files.get(name=saved["name"])
+                    state = self._file_state(existing)
+                    if state.endswith("ACTIVE"):
+                        print("Reusing the active Gemini video upload.")
+                        return existing
+                    if not state.endswith("FAILED"):
+                        return self._wait_until_active(existing)
+                    if not self._delete_uploaded_video(existing):
+                        raise RuntimeError(
+                            "Could not clean up a failed Gemini upload; "
+                            "retry after provider access is restored."
+                        )
+                except errors.APIError as exc:
+                    if self._is_retryable_api_error(exc):
+                        raise
+                    if self._status_code(exc) != 404:
+                        raise
+                except (
+                    httpx.TransportError,
+                    TimeoutError,
+                    ConnectionError,
+                ):
+                    # Keep the cached pointer and retry the lookup later.
+                    raise
+            else:
+                deleted = self._delete_uploaded_video(
+                    SimpleNamespace(name=saved.get("name"))
+                )
+                if not deleted:
+                    raise RuntimeError(
+                        "Could not clean up an expired Gemini upload; "
+                        "retry after provider access is restored."
+                    )
+            cache.clear_upload()
+
+        uploaded = self._upload_video()
+        try:
+            cache.set_upload({
+                "name": getattr(uploaded, "name", ""),
+                "uri": getattr(uploaded, "uri", ""),
+                "mime_type": getattr(uploaded, "mime_type", ""),
+                "saved_at": time.time(),
+            })
+            active = self._wait_until_active(uploaded)
+            cache.set_upload({
+                "name": getattr(active, "name", ""),
+                "uri": getattr(active, "uri", ""),
+                "mime_type": getattr(active, "mime_type", ""),
+                "saved_at": time.time(),
+            })
+            return active
+        except Exception:
+            if self._delete_uploaded_video(uploaded):
+                cache.clear_upload()
+            raise
 
     def generate_from_video(
         self,
@@ -469,74 +727,266 @@ class CommentaryGenerator:
                 "duration_seconds is required for video commentary."
             )
 
+        cache = StageCache(
+            video_path,
+            identity=self._cache_identity(prompt, duration_seconds),
+        )
         uploaded_video = None
+        failure = None
+        verification_completed = False
 
         try:
-            uploaded_video = self._upload_video(video_path)
-            uploaded_video = self._wait_until_active(
-                uploaded_video
+            draft_context = {
+                "prompt": prompt,
+                "temperature": 0.0,
+                "visual": True,
+            }
+            cached_draft = self._cached_response(
+                cache,
+                "draft",
+                draft_context,
             )
 
-            video_part = self._video_part(uploaded_video)
+            if cached_draft is None:
+                uploaded_video = self._get_or_upload_video(cache)
+                draft_events, draft_model, draft_text = self._draft_events(
+                    self._video_part(uploaded_video),
+                    prompt,
+                    duration_seconds,
+                )
+                cache.set_stage(
+                    "draft",
+                    draft_context,
+                    {"model": draft_model, "response_text": draft_text},
+                )
+            else:
+                draft_text, draft_model = cached_draft
+                try:
+                    draft_events = parse_analysis_response(
+                        draft_text,
+                        duration_seconds=duration_seconds,
+                    )["events"]
+                except (TypeError, ValueError, KeyError):
+                    cache.clear_stage("draft")
+                    uploaded_video = self._get_or_upload_video(cache)
+                    draft_events, draft_model, draft_text = self._draft_events(
+                        self._video_part(uploaded_video),
+                        prompt,
+                        duration_seconds,
+                    )
+                    cache.set_stage(
+                        "draft",
+                        draft_context,
+                        {
+                            "model": draft_model,
+                            "response_text": draft_text,
+                        },
+                    )
 
-            draft_events = self._draft_events(
-                video_part,
-                prompt,
-                duration_seconds,
+            evidence_context = {
+                "draft_events": draft_events,
+                "builder": {
+                    "cell_width": self.evidence_builder.cell_width,
+                    "jpeg_quality": self.evidence_builder.jpeg_quality,
+                },
+            }
+            try:
+                evidence = self._restore_evidence(
+                    cache.get_stage("evidence", evidence_context)
+                )
+            except (TypeError, ValueError, KeyError):
+                evidence = None
+
+            if evidence is None:
+                evidence = self.evidence_builder.build(
+                    video_path,
+                    draft_events,
+                    duration_seconds,
+                )
+                cache.set_stage(
+                    "evidence",
+                    evidence_context,
+                    self._serialize_evidence(evidence),
+                )
+
+            evidence_digest = self._evidence_digest(evidence)
+            local_context = {
+                "evidence_digest": evidence_digest,
+                "enabled": os.getenv(
+                    "ENABLE_LOCAL_POSSESSION_VERIFIER",
+                    "true",
+                ).strip().lower() not in {"0", "false", "no", "off"},
+                "image_size": getattr(self.local_verifier, "image_size", None),
+                "version": 1,
+            }
+            local_signals = cache.get_stage("local_signals", local_context)
+            if not isinstance(local_signals, list):
+                local_signals = self._local_possession_signals(evidence)
+                cache.set_stage(
+                    "local_signals",
+                    local_context,
+                    local_signals,
+                )
+
+            verification_prompt = self.prompt_builder.build_verification(
+                draft_events
+            )
+            verification_context = {
+                "prompt": verification_prompt,
+                "evidence_digest": evidence_digest,
+                "temperature": 0.0,
+                "visual": True,
+            }
+            cached_verification = self._cached_response(
+                cache,
+                "verification",
+                verification_context,
             )
 
-            evidence = self.evidence_builder.build(
-                video_path,
-                draft_events,
-                duration_seconds,
-            )
+            if cached_verification is None:
+                if uploaded_video is None:
+                    uploaded_video = self._get_or_upload_video(cache)
+                verified_events, verifier_model, verification_text = (
+                    self._verify_events(
+                        self._video_part(uploaded_video),
+                        draft_events,
+                        evidence,
+                        duration_seconds,
+                    )
+                )
+                cache.set_stage(
+                    "verification",
+                    verification_context,
+                    {
+                        "model": verifier_model,
+                        "response_text": verification_text,
+                    },
+                )
+            else:
+                verification_text, verifier_model = cached_verification
+                try:
+                    verified_events = parse_verification_response(
+                        verification_text,
+                        draft_events=draft_events,
+                        duration_seconds=duration_seconds,
+                    )["events"]
+                except (TypeError, ValueError, KeyError):
+                    cache.clear_stage("verification")
+                    if uploaded_video is None:
+                        uploaded_video = self._get_or_upload_video(cache)
+                    verified_events, verifier_model, verification_text = (
+                        self._verify_events(
+                            self._video_part(uploaded_video),
+                            draft_events,
+                            evidence,
+                            duration_seconds,
+                        )
+                    )
+                    cache.set_stage(
+                        "verification",
+                        verification_context,
+                        {
+                            "model": verifier_model,
+                            "response_text": verification_text,
+                        },
+                    )
 
-            local_signals = (
-                self._local_possession_signals(evidence)
-            )
-
-            verified_events = self._verify_events(
-                video_part,
-                draft_events,
-                evidence,
-                duration_seconds,
-            )
-
+            verification_completed = True
             verified_events = reconcile_possession(
                 verified_events,
                 local_signals,
             )
-
             verified_events = mark_team_mentions(
                 verified_events,
-                max_mentions=int(
-                    os.getenv(
-                        "MAX_TEAM_MENTIONS",
-                        "4",
-                    )
-                ),
+                max_mentions=int(os.getenv("MAX_TEAM_MENTIONS", "4")),
             )
 
-            # Release the OpenCV images before TTS starts.
             for item in evidence:
                 item.pop("frames", None)
 
-            return self._write_commentary(
-                verified_events,
-                duration_seconds,
+            commentary_prompt = self.prompt_builder.build_commentary(
+                verified_events
+            )
+            commentary_context = {
+                "prompt": commentary_prompt,
+                "temperature": 0.35,
+                "visual": False,
+            }
+            cached_commentary = self._cached_response(
+                cache,
+                "commentary",
+                commentary_context,
             )
 
-        finally:
-            if (
-                uploaded_video is not None
-                and getattr(uploaded_video, "name", None)
-            ):
+            if cached_commentary is None:
+                commentary_result, writer_model, commentary_text = (
+                    self._write_commentary(
+                        verified_events,
+                        duration_seconds,
+                    )
+                )
+                cache.set_stage(
+                    "commentary",
+                    commentary_context,
+                    {
+                        "model": writer_model,
+                        "response_text": commentary_text,
+                    },
+                )
+            else:
+                commentary_text, writer_model = cached_commentary
                 try:
-                    self.client.files.delete(
-                        name=uploaded_video.name
+                    commentary_result = parse_commentary_response(
+                        commentary_text,
+                        verified_events=verified_events,
+                        duration_seconds=duration_seconds,
                     )
-                except Exception as exc:
-                    print(
-                        "Warning: could not delete Gemini upload: "
-                        f"{exc}"
+                except (TypeError, ValueError, KeyError):
+                    cache.clear_stage("commentary")
+                    commentary_result, writer_model, commentary_text = (
+                        self._write_commentary(
+                            verified_events,
+                            duration_seconds,
+                        )
                     )
+                    cache.set_stage(
+                        "commentary",
+                        commentary_context,
+                        {
+                            "model": writer_model,
+                            "response_text": commentary_text,
+                        },
+                    )
+
+            return commentary_result
+
+        except Exception as exc:
+            failure = exc
+            raise
+
+        finally:
+            if uploaded_video is not None:
+                if (
+                    failure is not None
+                    and self._is_transient_failure(failure)
+                    and not verification_completed
+                ):
+                    # Keep a completed upload only for an unfinished provider
+                    # stage; the next run revalidates that the upload is active.
+                    pass
+                else:
+                    if self._delete_uploaded_video(uploaded_video):
+                        cache.clear_upload()
+            elif (
+                not (
+                    failure is not None
+                    and self._is_transient_failure(failure)
+                    and not verification_completed
+                )
+                and cache.get_upload()
+            ):
+                saved_upload = cache.get_upload()
+                if self._delete_uploaded_video(
+                    SimpleNamespace(name=saved_upload.get("name"))
+                ):
+                    cache.clear_upload()
