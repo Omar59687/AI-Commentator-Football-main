@@ -88,15 +88,16 @@ class VideoMerger:
         )
 
         if tempo > self.MAX_TEMPO:
-            print(
-                "Skipping commentary line because it "
-                "cannot fit naturally: "
-                f"{segment['path']} "
-                f"({start:.2f}s-{end:.2f}s, "
-                f"required tempo={tempo:.2f})"
+            raise ValueError(
+                "Commentary segment cannot fit within its scheduled "
+                "window without exceeding the maximum tempo: "
+                f"path={segment['path']}, "
+                f"window={start:.2f}s-{end:.2f}s "
+                f"(available={available_time:.2f}s), "
+                f"duration={duration:.2f}s, "
+                f"required_tempo={tempo:.2f}, "
+                f"maximum_tempo={self.MAX_TEMPO:.2f}."
             )
-
-            return None
 
         audio = self._change_tempo(
             audio,
@@ -148,8 +149,12 @@ class VideoMerger:
                 segment
             )
 
-            if audio is not None:
-                prepared.append(audio)
+            if audio is None:
+                raise RuntimeError(
+                    "Commentary segment preparation returned no audio for "
+                    f"{segment.get('path', '<unknown path>')}."
+                )
+            prepared.append(audio)
 
         if not prepared:
             raise ValueError(
