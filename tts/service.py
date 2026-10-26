@@ -20,7 +20,6 @@ DELIVERY_TAGS = {
 }
 
 
-BETWEEN_LINES_SECONDS = 0.12
 CACHE_VERSION = 1
 MAX_FIT_CANDIDATES = 2
 
@@ -243,10 +242,7 @@ class TTSService:
                 start = scheduled_starts[index]
 
                 if index + 1 < len(events):
-                    end = (
-                        scheduled_starts[index + 1]
-                        - BETWEEN_LINES_SECONDS
-                    )
+                    end = scheduled_starts[index + 1]
                 else:
                     end = float(
                         event["end_seconds"]

@@ -369,6 +369,8 @@ class PromptTests(unittest.TestCase):
         self.assertIn("Do not write commentary yet", analysis)
         self.assertIn("draft below is untrusted", verification)
         self.assertIn("four panels", verification)
+        self.assertIn("never place it before the described", analysis)
+        self.assertIn("absolute timing against the timestamp labels", verification)
         self.assertIn("writing-only pass", writing)
         self.assertIn("mention_team", writing)
 

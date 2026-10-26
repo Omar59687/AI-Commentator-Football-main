@@ -13,7 +13,6 @@ from utils.video_metadata import (
 class VideoMerger:
 
     END_MARGIN_SECONDS = 0.08
-    FADE_SECONDS = 0.08
     MAX_TEMPO = 1.35
 
     def _change_tempo(
@@ -116,19 +115,6 @@ class VideoMerger:
         audio = audio.filter(
             "volume",
             1.08,
-        )
-
-        fade_start = max(
-            0.0,
-            min(duration / tempo, available_time)
-            - self.FADE_SECONDS,
-        )
-
-        audio = audio.filter(
-            "afade",
-            t="out",
-            st=fade_start,
-            d=self.FADE_SECONDS,
         )
 
         delay_ms = round(start * 1000)

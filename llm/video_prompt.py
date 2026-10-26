@@ -66,6 +66,9 @@ TIMING
 - end_seconds is when that same action finishes.
 - cue_seconds is the earliest point when the neutral description is visually
   true in full.
+- Treat cue_seconds as the narration start: never place it before the described
+  action is visibly underway. If the exact onset is uncertain, choose a later
+  timestamp within the verified action rather than anticipating it.
 - cue_seconds must be between start_seconds and end_seconds.
 - Normally leave at least 2.5 seconds between cues.
 - Use timestamps in 0.5-second increments.
@@ -142,6 +145,11 @@ VERIFICATION METHOD
 6. Correct the action description as well as the possession. A pass release,
    travelling ball, reception, carry, challenge, cross, and shot are different
    actions.
+7. Re-check absolute timing against the timestamp labels on the evidence
+   panels. cue_seconds is when narration starts: it must not precede the
+   described action becoming visibly identifiable. When the onset is uncertain,
+   choose a later point inside the verified action; do not shift events by an
+   estimated offset or by stretching/compressing the timeline.
 
 POSSESSION RULES
 

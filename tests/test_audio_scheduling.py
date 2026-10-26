@@ -346,11 +346,34 @@ class AudioScheduleTests(unittest.TestCase):
             os.chdir(directory)
             try:
                 with patch("tts.service.TTSGenerator", FakeTTS):
-                    with self.assertRaisesRegex(ValueError, "no valid narration window"):
+                    with self.assertRaisesRegex(
+                        ValueError,
+                        "no valid narration window|no usable narration time",
+                    ):
                         TTSService().generate(
                             [event(1.0, 2.0), event(1.05, 2.0)],
                             video_duration=3.0,
                         )
+            finally:
+                os.chdir(old)
+
+    def test_adjacent_segment_window_uses_only_the_rendering_safety_margin(self):
+        FakeTTS.durations = {"english": 0.5, "arabic": 0.5}
+        first = event(cue=1.0, end=2.0)
+        second = event(cue=2.0, end=3.0)
+        with tempfile.TemporaryDirectory() as directory:
+            old = os.getcwd()
+            os.chdir(directory)
+            try:
+                with patch("tts.service.TTSGenerator", FakeTTS):
+                    result = TTSService().generate([first, second], video_duration=4.0)
+                self.assertEqual(result["english"][0]["end_seconds"], 2.0)
+                self.assertEqual(result["arabic"][0]["end_seconds"], 2.0)
+                self.assertLessEqual(
+                    result["english"][0]["start_seconds"]
+                    + result["english"][0]["duration"],
+                    result["english"][1]["start_seconds"],
+                )
             finally:
                 os.chdir(old)
 
