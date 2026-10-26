@@ -322,7 +322,10 @@ class GeminiSuccessfulContinuationTests(unittest.TestCase):
         ])
         generator.prompt_builder = VideoCommentaryPrompt()
 
-        with patch("llm.generator.time.sleep") as sleep:
+        with patch("llm.generator.time.sleep") as sleep, patch(
+            "llm.generator.random.uniform",
+            return_value=0.0,
+        ):
             events, model, response_text = generator._verify_events(
                 video_part=types.Part(text="video"),
                 draft_events=draft_events,
