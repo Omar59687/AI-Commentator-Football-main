@@ -652,7 +652,7 @@ class CommentaryGenerator:
             )
             return False
 
-    def _get_or_upload_video(self, cache):
+    def _get_or_upload_video(self, cache, video_path):
 
         saved = cache.get_upload()
         if saved:
@@ -694,7 +694,7 @@ class CommentaryGenerator:
                     )
             cache.clear_upload()
 
-        uploaded = self._upload_video()
+        uploaded = self._upload_video(video_path)
         try:
             cache.set_upload({
                 "name": getattr(uploaded, "name", ""),
@@ -748,7 +748,7 @@ class CommentaryGenerator:
             )
 
             if cached_draft is None:
-                uploaded_video = self._get_or_upload_video(cache)
+                uploaded_video = self._get_or_upload_video(cache, video_path)
                 draft_events, draft_model, draft_text = self._draft_events(
                     self._video_part(uploaded_video),
                     prompt,
@@ -768,7 +768,7 @@ class CommentaryGenerator:
                     )["events"]
                 except (TypeError, ValueError, KeyError):
                     cache.clear_stage("draft")
-                    uploaded_video = self._get_or_upload_video(cache)
+                    uploaded_video = self._get_or_upload_video(cache, video_path)
                     draft_events, draft_model, draft_text = self._draft_events(
                         self._video_part(uploaded_video),
                         prompt,
@@ -845,7 +845,7 @@ class CommentaryGenerator:
 
             if cached_verification is None:
                 if uploaded_video is None:
-                    uploaded_video = self._get_or_upload_video(cache)
+                    uploaded_video = self._get_or_upload_video(cache, video_path)
                 verified_events, verifier_model, verification_text = (
                     self._verify_events(
                         self._video_part(uploaded_video),
@@ -873,7 +873,7 @@ class CommentaryGenerator:
                 except (TypeError, ValueError, KeyError):
                     cache.clear_stage("verification")
                     if uploaded_video is None:
-                        uploaded_video = self._get_or_upload_video(cache)
+                        uploaded_video = self._get_or_upload_video(cache, video_path)
                     verified_events, verifier_model, verification_text = (
                         self._verify_events(
                             self._video_part(uploaded_video),
