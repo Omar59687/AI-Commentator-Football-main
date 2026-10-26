@@ -51,10 +51,7 @@ class VideoMerger:
 
     def _prepare_segment(self, segment):
 
-        start = max(
-            0.0,
-            float(segment["start_seconds"]),
-        )
+        start = float(segment["start_seconds"])
 
         end = float(segment["end_seconds"])
 
