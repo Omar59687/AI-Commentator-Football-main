@@ -55,3 +55,26 @@ voice remains too flat.
 ```powershell
 python -m unittest discover -s tests -v
 ```
+
+## Offline continuity re-merge
+
+From the repository root in PowerShell, re-merge the validated local Gemini and
+ElevenLabs caches without contacting either provider:
+
+```powershell
+python -m tools.offline_remerge --root . --video .\media\input\video.mp4
+```
+
+The command validates the Gemini stage cache, verified event timing, both
+post-fit TTS scripts, and the exact matching MP3 cache metadata before rendering.
+It writes `english_continuity_comparison.mp4`,
+`arabic_continuity_comparison.mp4`, `continuity_remerge_manifest.json`, and
+`continuity_remerge_report.txt` under `media/output/`. It refuses to overwrite
+any of those comparison artifacts and leaves the original commentary videos and
+audio cache untouched. A validation error stops before rendering.
+
+Run the focused mocked tests with:
+
+```powershell
+python -m unittest tests.test_offline_remerge -v
+```
