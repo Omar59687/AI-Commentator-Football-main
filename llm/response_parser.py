@@ -73,58 +73,128 @@ ARABIC_COLOR_PATTERNS = {
 
 FALLBACK_LINES = {
     "carry": (
-        "Advancing with the ball.",
-        "تقدم واضح بالكرة.",
+        "A player carries the ball.",
+        "اللاعب يحمل الكرة.",
     ),
     "pass_release": (
-        "The ball is played on.",
-        "تمريرة جديدة الآن.",
+        "A pass is released.",
+        "تُرسل الكرة بتمريرة.",
     ),
     "reception": (
-        "A controlled first touch.",
-        "استلام جيد للكرة.",
+        "The player receives it.",
+        "يستلم اللاعب الكرة.",
     ),
     "back_pass": (
-        "Back it goes.",
-        "الكرة إلى الخلف.",
+        "A backward pass is played.",
+        "تمريرة إلى الخلف.",
     ),
     "long_ball": (
-        "The ball is sent long.",
-        "كرة طويلة إلى الأمام.",
+        "The ball travels long.",
+        "كرة طويلة.",
     ),
     "challenge": (
-        "A firm challenge here.",
-        "صراع قوي على الكرة.",
+        "A challenge for the ball.",
+        "منافسة على الكرة.",
     ),
     "clearance": (
-        "Cleared away from danger.",
-        "إبعاد للكرة عن الخطر.",
+        "The ball is cleared.",
+        "يتم إبعاد الكرة.",
     ),
     "cross": (
-        "The ball comes across.",
-        "كرة عرضية إلى الداخل.",
+        "A cross is played.",
+        "تُرسل كرة عرضية.",
     ),
     "shot": (
-        "The shot comes in!",
-        "تسديدة قوية الآن!",
+        "A shot is taken.",
+        "تُسدد الكرة.",
     ),
     "save": (
-        "The keeper makes the save!",
-        "الحارس يتصدى للكرة!",
+        "A save is made.",
+        "تم التصدي للكرة.",
     ),
     "restart": (
-        "Play restarts here.",
-        "استئناف اللعب الآن.",
+        "Play restarts.",
+        "يُستأنف اللعب.",
     ),
     "movement": (
-        "Players move into space.",
-        "تحرك جديد في الملعب.",
+        "A player moves.",
+        "لاعب يتحرك.",
     ),
     "unclear": (
-        "Play continues here.",
-        "اللعب متواصل هنا.",
+        "An unclear moment.",
+        "لقطة غير واضحة.",
     ),
 }
+
+
+ACTION_DESCRIPTION_PATTERNS = {
+    "carry": re.compile(
+        r"\b(?:carries?|carrying|dribbles?|dribbling)\b", re.I
+    ),
+    "pass_release": re.compile(
+        r"\b(?:pass|passes|passing|releases?|kicks?)\b", re.I
+    ),
+    "reception": re.compile(
+        r"\b(?:receives?|receiving|reception|controls?|touch)\b", re.I
+    ),
+    "back_pass": re.compile(
+        r"\b(?:backward|backwards|back pass|plays? (?:the ball )?back|"
+        r"sends? (?:the ball )?back)\b",
+        re.I,
+    ),
+    "long_ball": re.compile(
+        r"\b(?:long ball|travels? long|sends? .*long)\b", re.I
+    ),
+    "challenge": re.compile(
+        r"\b(?:challenge|challenging|contest|contests)\b", re.I
+    ),
+    "clearance": re.compile(
+        r"\b(?:clearance|clears?|cleared|clearing)\b", re.I
+    ),
+    "cross": re.compile(
+        r"\b(?:cross|crosses|crossing|ball across)\b", re.I
+    ),
+    "shot": re.compile(
+        r"\b(?:shot|shoots?|shooting|strikes? (?:the ball|it))\b", re.I
+    ),
+    "save": re.compile(
+        r"\b(?:save|saves|saved|stops? (?:the ball|it))\b", re.I
+    ),
+    "restart": re.compile(
+        r"\b(?:restart|restarts|kick[- ]off|throw[- ]in|corner kick)\b",
+        re.I,
+    ),
+    "movement": re.compile(
+        r"\b(?:movement|moves?|moving|runs?|running)\b", re.I
+    ),
+}
+
+
+def grounded_fallback_lines(event):
+    """Return action-only lines when verified context explicitly supports them."""
+    if not isinstance(event, dict):
+        return None
+
+    action_type = event.get("action_type")
+    pattern = ACTION_DESCRIPTION_PATTERNS.get(action_type)
+    description = event.get("description")
+    if (
+        pattern is None
+        or not isinstance(description, str)
+        or not pattern.search(description)
+        or event.get("action_confidence") not in {"medium", "high"}
+        or event.get("ball_state") == "not_visible"
+    ):
+        return None
+
+    # A generic pass release must not be inferred from a backward pass.
+    if (
+        action_type == "pass_release"
+        and ACTION_DESCRIPTION_PATTERNS["back_pass"].search(description)
+    ):
+        return None
+
+    return FALLBACK_LINES[action_type]
 
 
 def _load_json(text, allow_event_array=False):

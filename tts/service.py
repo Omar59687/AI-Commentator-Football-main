@@ -6,6 +6,7 @@ from pathlib import Path
 import tempfile
 import uuid
 
+from llm.response_parser import grounded_fallback_lines
 from tts.generator import TTSGenerator
 from utils.video_metadata import get_media_duration, has_audio_stream
 from video.merger import VideoMerger
@@ -21,18 +22,7 @@ DELIVERY_TAGS = {
 
 BETWEEN_LINES_SECONDS = 0.12
 CACHE_VERSION = 1
-MAX_FIT_CANDIDATES = 3
-
-ENGLISH_DISCOURSE_PREFIXES = ("Now, ", "Now ", "And ", "Well, ", "Well ")
-ENGLISH_REMOVABLE_MODIFIERS = ("quick ", "sharp ", "strong ", "steady ")
-ARABIC_REMOVABLE_MODIFIERS = (
-    ("تمريرة سريعة", "تمريرة"),
-    ("كرة سريعة", "كرة"),
-    ("صراع قوي", "صراع"),
-    ("التحام قوي", "التحام"),
-    ("انطلاقة قوية", "انطلاقة"),
-    ("بناء هادئ", "بناء"),
-)
+MAX_FIT_CANDIDATES = 2
 
 
 def build_tts_text(event, language):
@@ -91,50 +81,21 @@ def calculate_scheduled_starts(events, video_duration=None):
     return starts
 
 
-def _shorten_grounded_line(line, language):
-    """Remove one approved non-factual modifier without changing the action."""
-    if language == "english":
-        for prefix in ENGLISH_DISCOURSE_PREFIXES:
-            if line.startswith(prefix):
-                shortened = line[len(prefix):]
-                if shortened:
-                    return shortened[0].upper() + shortened[1:]
-        lowered = line.lower()
-        for modifier in ENGLISH_REMOVABLE_MODIFIERS:
-            index = lowered.find(modifier)
-            if index >= 0:
-                shortened = line[:index] + line[index + len(modifier):]
-                if shortened.strip():
-                    return shortened.strip()
-    else:
-        for phrase, replacement in ARABIC_REMOVABLE_MODIFIERS:
-            if phrase in line:
-                return line.replace(phrase, replacement, 1).strip()
-        for prefix in ("والآن ", "الآن "):
-            if line.startswith(prefix):
-                shortened = line[len(prefix):]
-                if shortened:
-                    return shortened
-    return None
-
-
 def _fit_candidates(event, language):
     primary = event[f"{language}_tts"].strip()
     candidates = [primary]
 
-    neutral = event.get(f"{language}_neutral_tts")
-    if isinstance(neutral, str):
-        neutral = neutral.strip()
+    # Writer-provided neutral lines are not semantically checked by the parser.
+    # Use only the parser's action-specific fallback after verified-context checks.
+    fallback_lines = grounded_fallback_lines(event)
+    if fallback_lines is not None:
+        fallback = fallback_lines[0 if language == "english" else 1]
         is_shorter = (
-            len(neutral.split()) < len(primary.split())
-            or len(neutral) < len(primary)
+            len(fallback.split()) < len(primary.split())
+            or len(fallback) < len(primary)
         )
-        if neutral and neutral != primary and is_shorter:
-            candidates.append(neutral)
-
-    shortened = _shorten_grounded_line(primary, language)
-    if shortened and shortened not in candidates:
-        candidates.append(shortened)
+        if fallback != primary and is_shorter:
+            candidates.append(fallback)
 
     return candidates[:MAX_FIT_CANDIDATES]
 

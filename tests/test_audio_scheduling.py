@@ -6,6 +6,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
+from llm.response_parser import grounded_fallback_lines
 from services.pipeline_service import PipelineService
 from tts.generator import TTSGenerator
 from tts.service import TTSService, calculate_scheduled_starts
@@ -16,6 +17,10 @@ def event(cue=1.0, end=4.0):
     return {
         "cue_seconds": cue,
         "end_seconds": end,
+        "action_type": "back_pass",
+        "description": "A player releases a backward pass.",
+        "ball_state": "controlled",
+        "action_confidence": "high",
         "english_tts": "Back it goes.",
         "arabic_tts": "الكرة إلى الخلف.",
     }
@@ -175,24 +180,25 @@ class AudioScheduleTests(unittest.TestCase):
             finally:
                 os.chdir(old)
 
-    def test_fitting_uses_grounded_neutral_line_and_actual_probe_duration(self):
+    def test_fitting_uses_verified_action_line_and_actual_probe_duration(self):
         generator = CacheableFakeTTS()
         source = event(cue=1.0, end=4.0)
         source.update({
-            "english_tts": "A sharp pass into the middle.",
+            "action_type": "pass_release",
+            "description": "A player releases a pass into midfield.",
+            "english_tts": "The player releases a pass into midfield.",
             "english_neutral_tts": "Pass into the middle.",
-            "arabic_tts": "تمريرة إلى الوسط.",
-            "arabic_neutral_tts": "الكرة إلى الوسط.",
+            "arabic_tts": "اللاعب يرسل تمريرة نحو منتصف الملعب.",
         })
         generator.duration_by_text = {
-            "[focused] A sharp pass into the middle.": 4.2,
-            "[focused] Pass into the middle.": 1.25,
-            "[focused] تمريرة إلى الوسط.": 1.5,
-            "[focused] الكرة إلى الوسط.": 1.5,
+            "[focused] The player releases a pass into midfield.": 4.2,
+            "[focused] A pass is released.": 1.25,
+            "[focused] اللاعب يرسل تمريرة نحو منتصف الملعب.": 1.5,
+            "[focused] تُرسل الكرة بتمريرة.": 1.5,
         }
         generator.reported_duration_by_text = {
-            "[focused] A sharp pass into the middle.": 0.5,
-            "[focused] Pass into the middle.": 0.4,
+            "[focused] The player releases a pass into midfield.": 0.5,
+            "[focused] A pass is released.": 0.4,
         }
         with tempfile.TemporaryDirectory() as directory:
             old = os.getcwd()
@@ -200,66 +206,75 @@ class AudioScheduleTests(unittest.TestCase):
             try:
                 with patch("tts.service.TTSGenerator", return_value=generator):
                     result = TTSService().generate([source], video_duration=4.0)
-                self.assertEqual(source["english_tts"], "Pass into the middle.")
-                self.assertEqual(result["english"][0]["text"], "[focused] Pass into the middle.")
+                self.assertEqual(source["english_tts"], "A pass is released.")
+                self.assertEqual(result["english"][0]["text"], "[focused] A pass is released.")
                 self.assertEqual(result["english"][0]["duration"], 1.25)
                 self.assertEqual(result["english"][0]["start_seconds"], 1.0)
                 self.assertEqual(result["english"][0]["end_seconds"], 4.0)
             finally:
                 os.chdir(old)
 
-    def test_bounded_shortening_retries_then_fails_without_dropping_event(self):
+    def test_bounded_grounded_fallback_fails_without_dropping_event(self):
         generator = CacheableFakeTTS()
         source = event(cue=1.0, end=4.0)
         source.update({
-            "english_tts": "Now, a sharp pass moves inside.",
+            "action_type": "pass_release",
+            "description": "A player releases a pass inside.",
+            "english_tts": "The player releases a pass inside.",
             "english_neutral_tts": "A pass inside.",
         })
         generator.duration_by_text = {
-            "[focused] Now, a sharp pass moves inside.": 5.0,
-            "[focused] A pass inside.": 5.0,
-            "[focused] A sharp pass moves inside.": 5.0,
+            "[focused] The player releases a pass inside.": 5.0,
+            "[focused] A pass is released.": 5.0,
         }
         with tempfile.TemporaryDirectory() as directory:
             old = os.getcwd()
             os.chdir(directory)
             try:
                 with patch("tts.service.TTSGenerator", return_value=generator):
-                    with self.assertRaisesRegex(ValueError, "3 bounded phrasing attempts"):
+                    with self.assertRaisesRegex(ValueError, "2 bounded phrasing attempts"):
                         TTSService().generate([source], video_duration=4.0)
-                self.assertEqual(len(generator.calls), 3)
-                self.assertEqual(source["english_tts"], "Now, a sharp pass moves inside.")
+                self.assertEqual(len(generator.calls), 2)
+                self.assertEqual(source["english_tts"], "The player releases a pass inside.")
             finally:
                 os.chdir(old)
 
-    def test_bilingual_fit_is_independent_and_preserves_original_cue(self):
+    def test_event_8_recovers_from_one_candidate_with_verified_short_line_and_cache(self):
         generator = CacheableFakeTTS()
         source = event(cue=24.5, end=26.0)
         source.update({
-            "english_tts": "Now, the keeper holds the ball.",
-            "english_neutral_tts": "Keeper holds it.",
-            "arabic_tts": "الحارس يمسك الكرة.",
-            "arabic_neutral_tts": "يمسكها الحارس.",
+            "event_id": 8,
+            "action_type": "pass_release",
+            "description": "A player releases a pass toward midfield.",
+            "ball_state": "in_flight",
+            "english_tts": "The player releases a pass toward midfield.",
+            "english_neutral_tts": "The player releases a pass toward midfield.",
+            "arabic_tts": "اللاعب يرسل تمريرة نحو منتصف الملعب.",
+            "arabic_neutral_tts": "اللاعب يرسل تمريرة نحو منتصف الملعب.",
         })
         generator.duration_by_text = {
-            "[focused] Now, the keeper holds the ball.": 1.96,
-            "[focused] Keeper holds it.": 1.9,
-            "[focused] الحارس يمسك الكرة.": 2.1,
-            "[focused] يمسكها الحارس.": 1.5,
+            "[focused] The player releases a pass toward midfield.": 2.04,
+            "[focused] A pass is released.": 1.6,
+            "[focused] اللاعب يرسل تمريرة نحو منتصف الملعب.": 1.3,
+            "[focused] تُرسل الكرة بتمريرة.": 1.3,
         }
+        original = dict(source)
         with tempfile.TemporaryDirectory() as directory:
             old = os.getcwd()
             os.chdir(directory)
             try:
                 with patch("tts.service.TTSGenerator", return_value=generator):
                     result = TTSService().generate([source], video_duration=30.0)
+                    second_result = TTSService().generate([original], video_duration=30.0)
                 self.assertEqual(result["english"][0]["start_seconds"], 24.5)
                 self.assertEqual(result["arabic"][0]["start_seconds"], 24.5)
-                self.assertEqual(result["english"][0]["duration"], 1.9)
-                self.assertEqual(result["arabic"][0]["duration"], 1.5)
-                self.assertEqual(source["english_tts"], "Keeper holds it.")
-                self.assertEqual(source["arabic_tts"], "يمسكها الحارس.")
-                self.assertEqual(len(generator.calls), 4)
+                self.assertEqual(result["english"][0]["end_seconds"], 26.0)
+                self.assertEqual(result["english"][0]["duration"], 1.6)
+                self.assertEqual(result["arabic"][0]["duration"], 1.3)
+                self.assertEqual(result["english"][0]["text"], "[focused] A pass is released.")
+                self.assertEqual(source["english_tts"], "A pass is released.")
+                self.assertEqual(second_result["english"][0]["path"], result["english"][0]["path"])
+                self.assertEqual(len(generator.calls), 3)
             finally:
                 os.chdir(old)
 
@@ -293,6 +308,20 @@ class AudioScheduleTests(unittest.TestCase):
                 "english",
             )
         self.assertNotEqual(identity, changed_settings)
+
+    def test_action_fallback_requires_matching_verified_context(self):
+        verified = event()
+        self.assertEqual(
+            grounded_fallback_lines(verified),
+            ("A backward pass is played.", "تمريرة إلى الخلف."),
+        )
+
+        wrong_description = {**verified, "description": "A player takes a shot."}
+        self.assertIsNone(grounded_fallback_lines(wrong_description))
+        low_confidence = {**verified, "action_confidence": "low"}
+        self.assertIsNone(grounded_fallback_lines(low_confidence))
+        hidden_ball = {**verified, "ball_state": "not_visible"}
+        self.assertIsNone(grounded_fallback_lines(hidden_ball))
 
 
     def test_window_is_clamped_to_video_duration(self):
