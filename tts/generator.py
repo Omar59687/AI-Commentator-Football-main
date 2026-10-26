@@ -1,11 +1,15 @@
 import base64
 import asyncio
 import os
+import re
 import threading
 from pathlib import Path
 
 from tts.text import strip_audio_tags
 from utils.video_metadata import get_media_duration
+
+
+DELIVERY_TAG_PATTERN = re.compile(r"\[[^\[\]\r\n]+\]")
 
 
 class TTSGenerator:
@@ -207,6 +211,71 @@ class TTSGenerator:
 
         return voice_id
 
+    def _speech_text(self, text: str) -> str:
+        if self.provider == "edge":
+            return strip_audio_tags(text)
+        return text if self.model_id == "eleven_v3" else strip_audio_tags(text)
+
+    def _elevenlabs_voice_settings(self):
+        if self.model_id == "eleven_v3":
+            return {
+                "stability": float(
+                    os.getenv("ELEVENLABS_STABILITY", "0.30")
+                ),
+            }
+        return {
+            "stability": float(
+                os.getenv("ELEVENLABS_STABILITY", "0.32")
+            ),
+            "similarity_boost": float(
+                os.getenv("ELEVENLABS_SIMILARITY_BOOST", "0.78")
+            ),
+            "style": float(os.getenv("ELEVENLABS_STYLE", "0.45")),
+            "use_speaker_boost": True,
+            "speed": float(os.getenv("ELEVENLABS_SPEED", "1.05")),
+        }
+
+    def cache_identity(
+        self,
+        text: str,
+        language: str,
+        previous_text: str = None,
+        next_text: str = None,
+    ):
+        """Return all inputs that can change synthesized audio."""
+        if self.provider == "edge":
+            voice = self._edge_voice(language)
+            model = "edge-tts"
+            settings = {
+                "rate": self._edge_option(language, "RATE", "+8%"),
+                "volume": self._edge_option(language, "VOLUME", "+0%"),
+                "pitch": self._edge_option(language, "PITCH", "+0Hz"),
+            }
+            context = {"previous_text": None, "next_text": None}
+        else:
+            voice = self._voice_id(language)
+            model = self.model_id
+            settings = {
+                "output_format": "mp3_44100_128",
+                "voice_settings": self._elevenlabs_voice_settings(),
+            }
+            context = {
+                "previous_text": previous_text if self.model_id != "eleven_v3" else None,
+                "next_text": next_text if self.model_id != "eleven_v3" else None,
+            }
+
+        return {
+            "schema_version": 1,
+            "provider": self.provider,
+            "voice": voice,
+            "model": model,
+            "settings": settings,
+            "text": text,
+            "delivery_tags": DELIVERY_TAG_PATTERN.findall(text),
+            "synthesis_text": self._speech_text(text),
+            "context": context,
+        }
+
     def generate(
         self,
         text: str,
@@ -223,11 +292,7 @@ class TTSGenerator:
                 language,
             )
 
-        speech_text = (
-            text
-            if self.model_id == "eleven_v3"
-            else strip_audio_tags(text)
-        )
+        speech_text = self._speech_text(text)
 
         options = {
             "voice_id": self._voice_id(language),
@@ -243,31 +308,7 @@ class TTSGenerator:
             if next_text:
                 options["next_text"] = next_text
 
-        if self.model_id == "eleven_v3":
-            options["voice_settings"] = {
-                "stability": float(
-                    os.getenv("ELEVENLABS_STABILITY", "0.30")
-                ),
-            }
-        else:
-            options["voice_settings"] = {
-                "stability": float(
-                    os.getenv("ELEVENLABS_STABILITY", "0.32")
-                ),
-                "similarity_boost": float(
-                    os.getenv(
-                        "ELEVENLABS_SIMILARITY_BOOST",
-                        "0.78"
-                    )
-                ),
-                "style": float(
-                    os.getenv("ELEVENLABS_STYLE", "0.45")
-                ),
-                "use_speaker_boost": True,
-                "speed": float(
-                    os.getenv("ELEVENLABS_SPEED", "1.05")
-                ),
-            }
+        options["voice_settings"] = self._elevenlabs_voice_settings()
 
         response = (
             self.client

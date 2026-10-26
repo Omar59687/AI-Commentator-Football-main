@@ -23,12 +23,58 @@ def event(cue=1.0, end=4.0):
 
 class FakeTTS:
     durations = {"english": 1.0, "arabic": 1.0}
+    calls = []
 
     def generate(self, text, path, language, **kwargs):
-        return self.durations[language]
+        duration = self.durations[language]
+        self.calls.append((text, path, language))
+        Path(path).write_text(str(duration), encoding="utf-8")
+        return duration
+
+
+class CacheableFakeTTS(FakeTTS):
+    duration_by_text = {}
+    reported_duration_by_text = {}
+
+    def cache_identity(self, text, language, previous_text=None, next_text=None):
+        return {
+            "provider": "mock",
+            "voice": language,
+            "model": "mock-model",
+            "settings": {"rate": "default"},
+            "text": text,
+            "delivery_tags": [text.split()[0]],
+            "context": {
+                "previous_text": previous_text,
+                "next_text": next_text,
+            },
+        }
+
+    def generate(self, text, path, language, **kwargs):
+        duration = self.duration_by_text.get(text, self.durations[language])
+        self.calls.append((text, path, language))
+        Path(path).write_text(str(duration), encoding="utf-8")
+        return self.reported_duration_by_text.get(text, duration)
 
 
 class AudioScheduleTests(unittest.TestCase):
+
+    def setUp(self):
+        FakeTTS.durations = {"english": 1.0, "arabic": 1.0}
+        FakeTTS.calls = []
+        CacheableFakeTTS.durations = {"english": 1.0, "arabic": 1.0}
+        CacheableFakeTTS.calls = []
+        CacheableFakeTTS.duration_by_text = {}
+        CacheableFakeTTS.reported_duration_by_text = {}
+        self.probe_patch = patch(
+            "tts.service.get_media_duration",
+            side_effect=lambda path: float(Path(path).read_text(encoding="utf-8")),
+        )
+        self.probe_patch.start()
+        self.addCleanup(self.probe_patch.stop)
+        self.audio_stream_patch = patch("tts.service.has_audio_stream", return_value=True)
+        self.audio_stream_patch.start()
+        self.addCleanup(self.audio_stream_patch.stop)
 
     def test_rejects_invalid_negative_and_nonfinite_cues(self):
         for cue in ("bad", -0.1, float("nan"), float("inf"), float("-inf")):
@@ -108,6 +154,145 @@ class AudioScheduleTests(unittest.TestCase):
                         TTSService().generate([event()], video_duration=4.0)
             finally:
                 os.chdir(old)
+
+    def test_cache_reuses_only_complete_matching_audio(self):
+        generator = CacheableFakeTTS()
+        with tempfile.TemporaryDirectory() as directory:
+            old = os.getcwd()
+            os.chdir(directory)
+            try:
+                with patch("tts.service.TTSGenerator", return_value=generator):
+                    first = TTSService().generate([event()], video_duration=4.0)
+                    TTSService().generate([event()], video_duration=4.0)
+                self.assertEqual(len(generator.calls), 2)
+                self.assertEqual(first["english"][0]["duration"], 1.0)
+
+                cached_path = Path(first["english"][0]["path"])
+                cached_path.write_bytes(b"9.9")
+                with patch("tts.service.TTSGenerator", return_value=generator):
+                    TTSService().generate([event()], video_duration=4.0)
+                self.assertEqual(len(generator.calls), 3)
+            finally:
+                os.chdir(old)
+
+    def test_fitting_uses_grounded_neutral_line_and_actual_probe_duration(self):
+        generator = CacheableFakeTTS()
+        source = event(cue=1.0, end=4.0)
+        source.update({
+            "english_tts": "A sharp pass into the middle.",
+            "english_neutral_tts": "Pass into the middle.",
+            "arabic_tts": "تمريرة إلى الوسط.",
+            "arabic_neutral_tts": "الكرة إلى الوسط.",
+        })
+        generator.duration_by_text = {
+            "[focused] A sharp pass into the middle.": 4.2,
+            "[focused] Pass into the middle.": 1.25,
+            "[focused] تمريرة إلى الوسط.": 1.5,
+            "[focused] الكرة إلى الوسط.": 1.5,
+        }
+        generator.reported_duration_by_text = {
+            "[focused] A sharp pass into the middle.": 0.5,
+            "[focused] Pass into the middle.": 0.4,
+        }
+        with tempfile.TemporaryDirectory() as directory:
+            old = os.getcwd()
+            os.chdir(directory)
+            try:
+                with patch("tts.service.TTSGenerator", return_value=generator):
+                    result = TTSService().generate([source], video_duration=4.0)
+                self.assertEqual(source["english_tts"], "Pass into the middle.")
+                self.assertEqual(result["english"][0]["text"], "[focused] Pass into the middle.")
+                self.assertEqual(result["english"][0]["duration"], 1.25)
+                self.assertEqual(result["english"][0]["start_seconds"], 1.0)
+                self.assertEqual(result["english"][0]["end_seconds"], 4.0)
+            finally:
+                os.chdir(old)
+
+    def test_bounded_shortening_retries_then_fails_without_dropping_event(self):
+        generator = CacheableFakeTTS()
+        source = event(cue=1.0, end=4.0)
+        source.update({
+            "english_tts": "Now, a sharp pass moves inside.",
+            "english_neutral_tts": "A pass inside.",
+        })
+        generator.duration_by_text = {
+            "[focused] Now, a sharp pass moves inside.": 5.0,
+            "[focused] A pass inside.": 5.0,
+            "[focused] A sharp pass moves inside.": 5.0,
+        }
+        with tempfile.TemporaryDirectory() as directory:
+            old = os.getcwd()
+            os.chdir(directory)
+            try:
+                with patch("tts.service.TTSGenerator", return_value=generator):
+                    with self.assertRaisesRegex(ValueError, "3 bounded phrasing attempts"):
+                        TTSService().generate([source], video_duration=4.0)
+                self.assertEqual(len(generator.calls), 3)
+                self.assertEqual(source["english_tts"], "Now, a sharp pass moves inside.")
+            finally:
+                os.chdir(old)
+
+    def test_bilingual_fit_is_independent_and_preserves_original_cue(self):
+        generator = CacheableFakeTTS()
+        source = event(cue=24.5, end=26.0)
+        source.update({
+            "english_tts": "Now, the keeper holds the ball.",
+            "english_neutral_tts": "Keeper holds it.",
+            "arabic_tts": "الحارس يمسك الكرة.",
+            "arabic_neutral_tts": "يمسكها الحارس.",
+        })
+        generator.duration_by_text = {
+            "[focused] Now, the keeper holds the ball.": 1.96,
+            "[focused] Keeper holds it.": 1.9,
+            "[focused] الحارس يمسك الكرة.": 2.1,
+            "[focused] يمسكها الحارس.": 1.5,
+        }
+        with tempfile.TemporaryDirectory() as directory:
+            old = os.getcwd()
+            os.chdir(directory)
+            try:
+                with patch("tts.service.TTSGenerator", return_value=generator):
+                    result = TTSService().generate([source], video_duration=30.0)
+                self.assertEqual(result["english"][0]["start_seconds"], 24.5)
+                self.assertEqual(result["arabic"][0]["start_seconds"], 24.5)
+                self.assertEqual(result["english"][0]["duration"], 1.9)
+                self.assertEqual(result["arabic"][0]["duration"], 1.5)
+                self.assertEqual(source["english_tts"], "Keeper holds it.")
+                self.assertEqual(source["arabic_tts"], "يمسكها الحارس.")
+                self.assertEqual(len(generator.calls), 4)
+            finally:
+                os.chdir(old)
+
+    def test_generator_cache_identity_covers_voice_model_settings_text_and_tags(self):
+        generator = TTSGenerator.__new__(TTSGenerator)
+        generator.provider = "elevenlabs"
+        generator.model_id = "eleven_v3"
+        generator.default_voice_id = "default-voice"
+        with patch.dict(os.environ, {
+            "ELEVENLABS_ENGLISH_VOICE_ID": "english-voice",
+            "ELEVENLABS_STABILITY": "0.30",
+        }):
+            identity = generator.cache_identity(
+                "[excited] A shot is taken!",
+                "english",
+            )
+            changed_text = generator.cache_identity(
+                "[focused] A shot is taken!",
+                "english",
+            )
+        self.assertEqual(identity["provider"], "elevenlabs")
+        self.assertEqual(identity["voice"], "english-voice")
+        self.assertEqual(identity["model"], "eleven_v3")
+        self.assertEqual(identity["delivery_tags"], ["[excited]"])
+        self.assertEqual(identity["text"], "[excited] A shot is taken!")
+        self.assertNotEqual(identity, changed_text)
+
+        with patch.dict(os.environ, {"ELEVENLABS_STABILITY": "0.55"}):
+            changed_settings = generator.cache_identity(
+                "[excited] A shot is taken!",
+                "english",
+            )
+        self.assertNotEqual(identity, changed_settings)
 
 
     def test_window_is_clamped_to_video_duration(self):
@@ -216,6 +401,43 @@ class PipelineScheduleIntegrationTests(unittest.TestCase):
         ):
             service.run("clip.mp4")
         self.assertEqual(captured["video_duration"], 5.0)
+
+    def test_pipeline_writes_the_scripts_selected_for_audio(self):
+        service = PipelineService.__new__(PipelineService)
+        service.summary_builder = SimpleNamespace(build_events=lambda events: "summary")
+        events = [{
+            "cue_seconds": 1.0,
+            "end_seconds": 3.0,
+            "english_tts": "Now, a quick pass.",
+            "english_neutral_tts": "A pass.",
+            "arabic_tts": "تمريرة سريعة.",
+            "arabic_neutral_tts": "تمريرة.",
+            "delivery": "focused",
+        }]
+        service.generator = SimpleNamespace(
+            generate_from_video=lambda *args, **kwargs: {"events": events}
+        )
+
+        def fit_events(actual_events, **kwargs):
+            actual_events[0]["english_tts"] = "A pass."
+            actual_events[0]["arabic_tts"] = "تمريرة."
+            return {"english": [], "arabic": []}
+
+        service.tts = SimpleNamespace(generate=fit_events)
+        service.merger = SimpleNamespace(merge=lambda *args: None)
+        saved = {}
+        with patch("services.pipeline_service.get_video_duration", return_value=5.0), patch(
+            "services.pipeline_service.save_text",
+            side_effect=lambda content, path: saved.update({path: content}),
+        ), patch("services.pipeline_service.ENABLE_TTS", True), patch(
+            "services.pipeline_service.ENABLE_VIDEO_MERGE", False
+        ):
+            result = service.run("clip.mp4")
+
+        self.assertEqual(result["english"], "A pass.")
+        self.assertEqual(result["arabic"], "تمريرة.")
+        self.assertEqual(saved["media/output/english_tts_script.txt"], "[focused] A pass.")
+        self.assertEqual(saved["media/output/arabic_tts_script.txt"], "[focused] تمريرة.")
 
 
 if __name__ == "__main__":

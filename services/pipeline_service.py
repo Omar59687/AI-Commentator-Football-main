@@ -58,6 +58,22 @@ class PipelineService:
             events
         )
 
+        save_text(
+            summary,
+            "media/output/observations.txt",
+        )
+
+        audio_segments = None
+
+        if ENABLE_TTS:
+
+            audio_segments = self.tts.generate(
+                events,
+                video_duration=duration,
+            )
+
+        # TTS may select a validated shorter line. Write scripts only after
+        # that selection so they describe the audio that will be rendered.
         english = " ".join(
             event["english_tts"].strip()
             for event in events
@@ -97,20 +113,6 @@ class PipelineService:
             arabic_tts,
             "media/output/arabic_tts_script.txt",
         )
-
-        save_text(
-            summary,
-            "media/output/observations.txt",
-        )
-
-        audio_segments = None
-
-        if ENABLE_TTS:
-
-            audio_segments = self.tts.generate(
-                events,
-                video_duration=duration,
-            )
 
         if ENABLE_VIDEO_MERGE:
 
