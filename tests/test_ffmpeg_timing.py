@@ -1,13 +1,61 @@
 import json
 import shutil
 import subprocess
+import sys
 import tempfile
+import time
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import patch
 
 import numpy as np
 
 from video.merger import VideoMerger
+from utils.process import run_bounded
+
+
+class BoundedSubprocessTests(unittest.TestCase):
+
+    def test_hanging_subprocess_fails_within_configured_timeout(self):
+        started = time.monotonic()
+        with self.assertRaises(subprocess.TimeoutExpired):
+            run_bounded(
+                [sys.executable, "-c", "import time; time.sleep(30)"],
+                timeout=0.25,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+            )
+        self.assertLess(time.monotonic() - started, 4.0)
+
+    def test_video_merger_ffmpeg_timeout_is_reported_and_bounded(self):
+        class FakeAudio:
+            def filter(self, *_args, **_kwargs):
+                return self
+
+        class FakeOutput:
+            def overwrite_output(self):
+                return self
+
+            def get_args(self):
+                return ["-c", "import time; time.sleep(30)"]
+
+        merger = VideoMerger()
+        merger.FFMPEG_TIMEOUT_SECONDS = 0.25
+        started = time.monotonic()
+        with (
+            patch("video.merger.get_video_duration", return_value=30.0),
+            patch("video.merger.has_audio_stream", return_value=False),
+            patch("video.merger.imageio_ffmpeg.get_ffmpeg_exe", return_value=sys.executable),
+            patch("video.merger.ffmpeg.input", return_value=SimpleNamespace(video=object())),
+            patch.object(merger, "_mix_segments", return_value=FakeAudio()),
+            patch("video.merger.ffmpeg.output", return_value=FakeOutput()),
+        ):
+            with self.assertRaisesRegex(RuntimeError, "FFmpeg timed out") as raised:
+                merger.merge("source.mp4", [], "out.mp4")
+        self.assertLess(time.monotonic() - started, 4.0)
+        self.assertIn("time.sleep(30)", str(raised.exception))
+        self.assertIn("Diagnostics:", str(raised.exception))
 
 
 @unittest.skipUnless(
@@ -24,15 +72,49 @@ class FFmpegTimingIntegrationTests(unittest.TestCase):
     }
 
     def _run(self, command):
-        subprocess.run(command, check=True, capture_output=True, text=True)
+        try:
+            result = run_bounded(
+                command,
+                timeout=120,
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+        except subprocess.TimeoutExpired as exc:
+            self.fail(
+                f"External process timed out after 120s: {command!r}; "
+                f"stdout={self._bounded(exc.stdout)!r}; "
+                f"stderr={self._bounded(exc.stderr)!r}"
+            )
+        if result.returncode:
+            raise subprocess.CalledProcessError(
+                result.returncode, command, result.stdout, result.stderr
+            )
 
     def _probe(self, path, selector=None):
         command = ["ffprobe", "-v", "error"]
         if selector:
             command += ["-select_streams", selector]
         command += ["-show_streams", "-show_format", "-show_frames", "-of", "json", str(path)]
-        result = subprocess.run(command, check=True, capture_output=True, text=True)
+        try:
+            result = run_bounded(
+                command, timeout=60, check=True,
+                capture_output=True, text=True,
+            )
+        except subprocess.TimeoutExpired as exc:
+            self.fail(
+                f"ffprobe timed out after 60s: {command!r}; "
+                f"stderr={self._bounded(exc.stderr)!r}"
+            )
         return json.loads(result.stdout)
+
+    @staticmethod
+    def _bounded(value, limit=2000):
+        if value is None:
+            return "<none>"
+        if isinstance(value, bytes):
+            value = value.decode("utf-8", errors="replace")
+        return value[:limit] + ("… [truncated]" if len(value) > limit else "")
 
     def _make_source(self, directory):
         source = directory / "timestamp-markers.mp4"

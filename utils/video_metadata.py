@@ -3,6 +3,10 @@ import subprocess
 from pathlib import Path
 
 import imageio_ffmpeg
+from utils.process import run_bounded
+
+
+PROBE_TIMEOUT_SECONDS = 30
 
 
 DURATION_PATTERN = re.compile(
@@ -30,7 +34,7 @@ def _probe_media(video_path: str) -> str:
         imageio_ffmpeg.get_ffmpeg_exe()
     )
 
-    result = subprocess.run(
+    result = run_bounded(
         [
             ffmpeg_executable,
             "-hide_banner",
@@ -41,7 +45,7 @@ def _probe_media(video_path: str) -> str:
         text=True,
         encoding="utf-8",
         errors="replace",
-        check=False,
+        timeout=PROBE_TIMEOUT_SECONDS,
     )
 
     return result.stderr

@@ -1,5 +1,8 @@
 import math
+import os
 from pathlib import Path
+import shlex
+import subprocess
 
 import ffmpeg
 import imageio_ffmpeg
@@ -8,12 +11,15 @@ from utils.video_metadata import (
     get_video_duration,
     has_audio_stream,
 )
+from utils.process import run_bounded
 
 
 class VideoMerger:
 
     END_MARGIN_SECONDS = 0.08
     MAX_TEMPO = 1.35
+    FFMPEG_TIMEOUT_SECONDS = 300
+    DIAGNOSTIC_LIMIT = 6000
 
     def _change_tempo(
         self,
@@ -228,26 +234,42 @@ class VideoMerger:
             movflags="+faststart",
         )
 
+        command = [ffmpeg_executable, *output.overwrite_output().get_args()]
+        command_text = self._bounded_text(self._format_command(command))
         try:
-
-            output.overwrite_output().run(
-                cmd=ffmpeg_executable,
-                capture_stdout=True,
-                capture_stderr=True,
+            result = run_bounded(
+                command,
+                timeout=self.FFMPEG_TIMEOUT_SECONDS,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
             )
-
-        except ffmpeg.Error as exc:
-
-            details = (
-                exc.stderr.decode(
-                    "utf-8",
-                    errors="replace",
+            if result.returncode:
+                raise RuntimeError(
+                    "FFmpeg failed to create the commentary video.\n"
+                    f"Command: {command_text}\n"
+                    f"Diagnostics: {self._bounded_text(result.stderr)}"
                 )
-                if exc.stderr
-                else str(exc)
-            )
-
+        except subprocess.TimeoutExpired as exc:
             raise RuntimeError(
-                "FFmpeg failed to create the "
-                f"commentary video:\n{details}"
+                "FFmpeg timed out while creating the commentary video after "
+                f"{self.FFMPEG_TIMEOUT_SECONDS}s.\n"
+                f"Command: {command_text}\n"
+                f"Diagnostics: {self._bounded_text(exc.stderr)}"
             ) from exc
+
+    @classmethod
+    def _bounded_text(cls, value):
+        if not value:
+            return "<none>"
+        if isinstance(value, bytes):
+            value = value.decode("utf-8", errors="replace")
+        value = value.strip()
+        if len(value) > cls.DIAGNOSTIC_LIMIT:
+            return value[:cls.DIAGNOSTIC_LIMIT] + "… [truncated]"
+        return value or "<empty>"
+
+    @staticmethod
+    def _format_command(command):
+        if os.name == "nt":
+            return subprocess.list2cmdline(command)
+        return shlex.join(command)
