@@ -1,3 +1,4 @@
+import math
 from pathlib import Path
 
 import ffmpeg
@@ -55,17 +56,28 @@ class VideoMerger:
             float(segment["start_seconds"]),
         )
 
-        end = max(
-            start + 0.25,
-            float(segment["end_seconds"]),
-        )
+        end = float(segment["end_seconds"])
+
+        if not math.isfinite(start) or not math.isfinite(end) or end <= start:
+            raise ValueError(
+                f"Invalid commentary window for {segment.get('path', '<unknown path>')}: "
+                f"{start!r}s to {end!r}s."
+            )
 
         duration = float(segment["duration"])
+        if not math.isfinite(duration) or duration <= 0:
+            raise ValueError(
+                f"Invalid commentary audio duration for {segment['path']}: "
+                f"{duration!r}s."
+            )
 
-        available_time = max(
-            0.25,
-            end - start - self.END_MARGIN_SECONDS,
-        )
+        available_time = end - start - self.END_MARGIN_SECONDS
+        if available_time <= 0:
+            raise ValueError(
+                "Commentary segment has no usable time after the end margin: "
+                f"path={segment['path']}, window={start:.3f}s-{end:.3f}s, "
+                f"end_margin={self.END_MARGIN_SECONDS:.3f}s."
+            )
 
         audio = ffmpeg.input(
             segment["path"]

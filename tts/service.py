@@ -2,6 +2,7 @@ import math
 from pathlib import Path
 
 from tts.generator import TTSGenerator
+from video.merger import VideoMerger
 
 
 DELIVERY_TAGS = {
@@ -166,13 +167,23 @@ class TTSService:
                         f"{language} event {index} has no valid narration "
                         f"window: {start:.3f}s to {end!r}s."
                     )
-                if duration > available:
+                fit_available = available - VideoMerger.END_MARGIN_SECONDS
+                if fit_available <= 0:
+                    raise ValueError(
+                        f"{language} event {index} has no usable narration "
+                        f"time after the {VideoMerger.END_MARGIN_SECONDS:.3f}s "
+                        "rendering margin."
+                    )
+                max_fittable_duration = fit_available * VideoMerger.MAX_TEMPO
+                if duration > max_fittable_duration:
                     raise ValueError(
                         f"{language} event {index} audio cannot fit its "
                         f"narration window: path={output_path}, "
                         f"window={start:.3f}s-{end:.3f}s, "
                         f"duration={duration:.3f}s, "
-                        f"available={available:.3f}s."
+                        f"available={fit_available:.3f}s, "
+                        f"required_tempo={duration / fit_available:.3f}, "
+                        f"maximum_tempo={VideoMerger.MAX_TEMPO:.2f}."
                     )
 
                 generated[language].append({

@@ -108,7 +108,8 @@ class PipelineService:
         if ENABLE_TTS:
 
             audio_segments = self.tts.generate(
-                events
+                events,
+                video_duration=duration,
             )
 
         if ENABLE_VIDEO_MERGE:

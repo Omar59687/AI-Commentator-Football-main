@@ -301,28 +301,28 @@ class TTSGenerator:
             getattr(response, "normalized_alignment", None)
             or getattr(response, "alignment", None)
         )
-
-        if alignment is None:
-            raise RuntimeError(
-                "ElevenLabs returned audio without timing information."
+        alignment_end = None
+        if alignment is not None:
+            end_times = getattr(
+                alignment,
+                "character_end_times_seconds",
+                None
             )
+            if end_times:
+                alignment_end = float(end_times[-1])
 
-        end_times = getattr(
-            alignment,
-            "character_end_times_seconds",
-            None
-        )
-
-        if not end_times:
-            raise RuntimeError(
-                "ElevenLabs returned an empty timing alignment."
-            )
-
-        duration = float(end_times[-1])
+        # Character alignment is useful for text timing, but the saved media
+        # duration is the authoritative duration used by the scheduler.
+        duration = get_media_duration(str(output))
 
         print(
             f"Generated {language} narration: "
             f"{duration:.2f} seconds"
+            + (
+                f" (alignment ends at {alignment_end:.2f}s)"
+                if alignment_end is not None
+                else ""
+            )
         )
 
         return duration
