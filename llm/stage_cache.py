@@ -197,8 +197,8 @@ class StageCache:
         )
         try:
             try:
-                os.fchmod(fd, 0o600)
-            except OSError:
+                getattr(os, "fchmod")(fd, 0o600)
+            except (AttributeError, OSError):
                 pass
             with os.fdopen(fd, "wb") as target:
                 target.write(payload)

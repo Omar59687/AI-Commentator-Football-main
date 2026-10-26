@@ -156,8 +156,9 @@ class StageCacheTests(unittest.TestCase):
                 "response_text": '{"events":[]}',
             })
 
-            mode = stat.S_IMODE(os.stat(cache.path).st_mode)
-            self.assertEqual(mode & 0o077, 0)
+            if os.name == "posix":
+                mode = stat.S_IMODE(os.stat(cache.path).st_mode)
+                self.assertEqual(mode & 0o077, 0)
             with open(cache.path, encoding="utf-8") as source:
                 stored = source.read()
             self.assertNotIn("test-key", stored)
