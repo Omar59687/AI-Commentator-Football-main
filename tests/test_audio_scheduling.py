@@ -43,7 +43,7 @@ class AudioScheduleTests(unittest.TestCase):
 
     def test_rejects_cue_beyond_video_duration(self):
         with self.assertRaisesRegex(ValueError, "exceeds video duration"):
-            calculate_scheduled_starts([event(cue=4.01)], video_duration=4.0)
+            calculate_scheduled_starts([event(cue=4.01, end=5.0)], video_duration=4.0)
 
     def test_accepts_cue_at_video_duration_but_no_window_is_reported(self):
         with tempfile.TemporaryDirectory() as directory:

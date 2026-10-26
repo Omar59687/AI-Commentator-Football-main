@@ -55,7 +55,7 @@ class VideoMerger:
 
         end = float(segment["end_seconds"])
 
-        if not math.isfinite(start) or not math.isfinite(end) or end <= start:
+        if not math.isfinite(start) or not math.isfinite(end) or start < 0 or end <= start:
             raise ValueError(
                 f"Invalid commentary window for {segment.get('path', '<unknown path>')}: "
                 f"{start!r}s to {end!r}s."
