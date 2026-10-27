@@ -209,6 +209,22 @@ class FFmpegTimingIntegrationTests(unittest.TestCase):
         ])
         return np.fromfile(pcm, dtype="<f4")
 
+    @staticmethod
+    def _ffmpeg_version(executable):
+        if not executable:
+            return "unavailable"
+        try:
+            result = subprocess.run(
+                [executable, "-version"],
+                capture_output=True,
+                text=True,
+                timeout=5,
+                check=False,
+            )
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            return f"unavailable ({type(exc).__name__})"
+        return result.stdout.splitlines()[0] if result.stdout else "unknown"
+
     def _onset(self, samples, expected_seconds):
         expected = round(expected_seconds * 48000)
         lower = max(0, expected - 2400)
@@ -303,6 +319,10 @@ class FFmpegTimingIntegrationTests(unittest.TestCase):
                     "duration": float(marker_duration),
                 })
 
+            production_ffmpeg = imageio_ffmpeg.get_ffmpeg_exe()
+            fixture_ffmpeg = shutil.which("ffmpeg")
+            production_version = self._ffmpeg_version(production_ffmpeg)
+            fixture_version = self._ffmpeg_version(fixture_ffmpeg)
             for language in ("english", "arabic"):
                 for mode, source in (
                     ("commentary-only", silent_source),
@@ -319,9 +339,27 @@ class FFmpegTimingIntegrationTests(unittest.TestCase):
                         float(np.sqrt(np.mean(np.square(decoded[round((cue + 0.08) * 48000):round((cue + 0.42) * 48000)], dtype=np.float64))))
                         for cue in cues
                     ]
-                    self.assertLessEqual(max(abs(20 * np.log10(value / rms[0])) for value in rms), 1.0)
-                    self.assertLessEqual(float(np.max(np.abs(decoded))), 0.70)
-                    self.assertTrue(all(peak > 0.2 for peak in peaks))
+                    decoded_peak = float(np.max(np.abs(decoded)))
+                    diagnostic = (
+                        f"variant={language}/{mode}; "
+                        f"decoded_aac_sample_peak={decoded_peak:.9f}; "
+                        f"intended_limiter_ceiling={VideoMerger.OUTPUT_PEAK_LIMIT:.3f}; "
+                        f"production_ffmpeg={production_ffmpeg!r} "
+                        f"({production_version}); "
+                        f"fixture_ffmpeg={fixture_ffmpeg!r} "
+                        f"({fixture_version}); decoder_ffmpeg={fixture_ffmpeg!r} "
+                        f"({fixture_version}); "
+                        "graph=amix(normalize=0)->"
+                        f"alimiter(limit={VideoMerger.OUTPUT_PEAK_LIMIT:.3f},"
+                        "attack=5,release=50,level=0,latency=1)"
+                    )
+                    self.assertLessEqual(
+                        max(abs(20 * np.log10(value / rms[0])) for value in rms),
+                        1.0,
+                        diagnostic,
+                    )
+                    self.assertLessEqual(decoded_peak, 0.70, diagnostic)
+                    self.assertTrue(all(peak > 0.2 for peak in peaks), diagnostic)
 
     def test_boundary_activity_report_detects_fit_and_does_not_claim_sentence_semantics(self):
         cues = (2.0, 2.8)

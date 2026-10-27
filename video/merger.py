@@ -18,9 +18,10 @@ class VideoMerger:
 
     END_MARGIN_SECONDS = 0.08
     MAX_TEMPO = 1.35
-    # AAC decoding can overshoot the floating-point sample limiter. The lower
-    # ceiling leaves measured codec headroom without automatic makeup gain.
-    OUTPUT_PEAK_LIMIT = 0.55
+    # AAC encoding/decoding can overshoot the floating-point sample limiter,
+    # especially at hard segment boundaries. Keep a conservative pre-encode
+    # ceiling so the decoded AAC retains headroom across supported FFmpeg builds.
+    OUTPUT_PEAK_LIMIT = 0.35
     FFMPEG_TIMEOUT_SECONDS = 300
     DIAGNOSTIC_LIMIT = 6000
 
