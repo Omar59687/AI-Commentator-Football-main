@@ -1,3 +1,4 @@
+import hashlib
 import json
 import shutil
 import subprocess
@@ -9,10 +10,17 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
+import imageio_ffmpeg
 import numpy as np
 
 from video.merger import VideoMerger
 from utils.process import run_bounded
+from tools.audio_integrity import (
+    _activity_interval,
+    _decode_audio,
+    _segment_filters,
+    analyze_manifest,
+)
 
 
 class BoundedSubprocessTests(unittest.TestCase):
@@ -145,6 +153,40 @@ class FFmpegTimingIntegrationTests(unittest.TestCase):
         ])
         return marker
 
+    def _make_hot_marker_audio(self, directory):
+        marker = directory / "hot-tone.wav"
+        self._run([
+            "ffmpeg", "-hide_banner", "-loglevel", "error", "-y",
+            "-f", "lavfi", "-i",
+            "sine=frequency=1000:sample_rate=48000:duration=0.5",
+            "-af", "volume=10", "-c:a", "pcm_f32le", str(marker),
+        ])
+        return marker
+
+    def _make_edge_marker_audio(self, directory):
+        marker = directory / "edge-marker.mp3"
+        self._run([
+            "ffmpeg", "-hide_banner", "-loglevel", "error", "-y",
+            "-f", "lavfi", "-i", "anullsrc=r=48000:cl=mono:d=0.15",
+            "-f", "lavfi", "-i", "sine=frequency=900:sample_rate=48000:duration=0.8",
+            "-f", "lavfi", "-i", "anullsrc=r=48000:cl=mono:d=0.15",
+            "-filter_complex", "[0:a][1:a][2:a]concat=n=3:v=0:a=1[out]",
+            "-map", "[out]", "-c:a", "libmp3lame", "-q:a", "3", str(marker),
+        ])
+        return marker
+
+    def _make_source_with_background(self, directory):
+        source = directory / "timestamp-markers-with-background.mp4"
+        self._run([
+            "ffmpeg", "-hide_banner", "-loglevel", "error", "-y",
+            "-f", "lavfi", "-i", "color=c=0x204020:s=640x360:r=25:d=30",
+            "-f", "lavfi", "-i", "sine=frequency=220:sample_rate=48000:duration=30",
+            "-map", "0:v:0", "-map", "1:a:0", "-c:v", "libx264",
+            "-preset", "ultrafast", "-pix_fmt", "yuv420p", "-c:a", "aac",
+            str(source),
+        ])
+        return source
+
     def _render(self, source, marker, output, cues):
         segments = []
         for index, cue in enumerate(cues):
@@ -240,3 +282,117 @@ class FFmpegTimingIntegrationTests(unittest.TestCase):
                 1.0,
                 delta=0.02,
             )
+
+    def test_nine_segment_gain_is_stable_and_final_aac_has_headroom(self):
+        cues = (2.0, 4.5, 7.5, 10.0, 12.8, 15.2, 17.5, 20.5, 24.5)
+        with tempfile.TemporaryDirectory() as tmp:
+            directory = Path(tmp)
+            silent_source = self._make_source(directory)
+            background_source = self._make_source_with_background(directory)
+            marker = self._make_hot_marker_audio(directory)
+            marker_duration = self._probe(marker)["format"]["duration"]
+            segments = []
+            for index, cue in enumerate(cues):
+                path = directory / f"event-{index}.wav"
+                shutil.copyfile(marker, path)
+                end = cues[index + 1] if index + 1 < len(cues) else 26.0
+                segments.append({
+                    "path": str(path),
+                    "start_seconds": cue,
+                    "end_seconds": end,
+                    "duration": float(marker_duration),
+                })
+
+            for language in ("english", "arabic"):
+                for mode, source in (
+                    ("commentary-only", silent_source),
+                    ("with-background", background_source),
+                ):
+                    output = directory / f"{language}-{mode}.mp4"
+                    VideoMerger().merge(str(source), segments, str(output))
+                    decoded = self._decoded_audio(output, directory)
+                    peaks = [
+                        float(np.max(np.abs(decoded[round((cue + 0.08) * 48000):round((cue + 0.42) * 48000)])))
+                        for cue in cues
+                    ]
+                    rms = [
+                        float(np.sqrt(np.mean(np.square(decoded[round((cue + 0.08) * 48000):round((cue + 0.42) * 48000)], dtype=np.float64))))
+                        for cue in cues
+                    ]
+                    self.assertLessEqual(max(abs(20 * np.log10(value / rms[0])) for value in rms), 1.0)
+                    self.assertLessEqual(float(np.max(np.abs(decoded))), 0.70)
+                    self.assertTrue(all(peak > 0.2 for peak in peaks))
+
+    def test_boundary_activity_report_detects_fit_and_does_not_claim_sentence_semantics(self):
+        cues = (2.0, 2.8)
+        with tempfile.TemporaryDirectory() as tmp:
+            directory = Path(tmp)
+            source = self._make_source(directory)
+            marker = self._make_marker_audio(directory)
+            marker_duration = float(self._probe(marker)["format"]["duration"])
+            output_dir = directory / "media" / "output"
+            output_dir.mkdir(parents=True)
+            segments = []
+            for index, cue in enumerate(cues):
+                path = output_dir / f"cached-{index}.mp3"
+                shutil.copyfile(marker, path)
+                segments.append({
+                    "event_id": index,
+                    "path": str(path),
+                    "start_seconds": cue,
+                    "end_seconds": cues[index + 1] if index + 1 < len(cues) else 4.0,
+                    "duration": marker_duration,
+                    "audio_sha256": hashlib.sha256(path.read_bytes()).hexdigest(),
+                    "size_bytes": path.stat().st_size,
+                })
+            output = output_dir / "english_continuity_comparison.mp4"
+            VideoMerger().merge(str(source), segments, str(output))
+            manifest = {
+                "outputs": {"english": output.name},
+                "languages": {"english": segments},
+            }
+            manifest_path = output_dir / "continuity_remerge_manifest.json"
+            manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+            report = analyze_manifest(directory, manifest_path)
+            events = report["languages"]["english"]["segments"]
+            self.assertEqual(len(events), 2)
+            self.assertLessEqual(abs(events[0]["processed_activity_absolute"]["start_seconds"] - cues[0]), 0.02)
+            self.assertFalse(events[0]["adjacent_activity_overlap"])
+            self.assertIn("NOT ASSESSED", report["semantic_sentence_completeness"])
+            self.assertIsNotNone(report["languages"]["english"]["decoded_aac_peak_dbfs"])
+            self.assertIsNotNone(
+                report["languages"]["english"]["gain_by_event_window"][0][
+                    "rendered_aac_window_activity"
+                ]
+            )
+
+    def test_silence_removal_and_atempo_keep_detectable_signal_edges_in_window(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            directory = Path(tmp)
+            marker = self._make_edge_marker_audio(directory)
+            source_duration = float(self._probe(marker)["format"]["duration"])
+            segment = {
+                "path": str(marker),
+                "start_seconds": 2.0,
+                "end_seconds": 3.0,
+                "duration": source_duration,
+            }
+            graph, tempo = _segment_filters(segment)
+            processed = _decode_audio(
+                marker,
+                imageio_ffmpeg.get_ffmpeg_exe(),
+                filter_graph=graph,
+            )
+            activity = _activity_interval(processed)
+            self.assertGreater(tempo, 1.0)
+            self.assertIsNotNone(activity)
+            self.assertAlmostEqual(activity["start_seconds"], 2.0, delta=0.03)
+            self.assertLess(activity["end_seconds"], 3.0)
+
+    def test_activity_detector_reports_signal_edges_without_semantic_claims(self):
+        samples = np.zeros(16000, dtype=np.float32)
+        samples[1600:6400] = 0.1
+        samples[8000:12800] = 0.1
+        activity = _activity_interval(samples)
+        self.assertAlmostEqual(activity["start_seconds"], 0.1, delta=0.01)
+        self.assertAlmostEqual(activity["end_seconds"], 0.8, delta=0.01)

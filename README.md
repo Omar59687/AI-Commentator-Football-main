@@ -78,3 +78,15 @@ Run the focused mocked tests with:
 ```powershell
 python -m unittest tests.test_offline_remerge -v
 ```
+
+After creating the comparison videos, measure cached-segment activity boundaries,
+adjacent overlap risk, and decoded AAC levels without provider calls:
+
+```powershell
+python -m tools.audio_integrity --root . --manifest media/output/continuity_remerge_manifest.json |
+    Tee-Object -FilePath "$env:TEMP\football-audio-integrity.json"
+```
+
+This reports waveform activity, not word or sentence meaning. Confirm sentence
+completion and phoneme preservation by listening or checking provider word
+alignment; the diagnostic does not claim semantic speech recognition.

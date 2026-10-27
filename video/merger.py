@@ -18,8 +18,22 @@ class VideoMerger:
 
     END_MARGIN_SECONDS = 0.08
     MAX_TEMPO = 1.35
+    # AAC decoding can overshoot the floating-point sample limiter. The lower
+    # ceiling leaves measured codec headroom without automatic makeup gain.
+    OUTPUT_PEAK_LIMIT = 0.55
     FFMPEG_TIMEOUT_SECONDS = 300
     DIAGNOSTIC_LIMIT = 6000
+
+    def _limit_peaks(self, audio):
+        """Apply a fixed peak ceiling without automatic makeup gain."""
+        return audio.filter(
+            "alimiter",
+            limit=self.OUTPUT_PEAK_LIMIT,
+            attack=5,
+            release=50,
+            level=0,
+            latency=1,
+        )
 
     def _change_tempo(
         self,
@@ -163,15 +177,17 @@ class VideoMerger:
             )
 
         if len(prepared) == 1:
-            return prepared[0]
+            return self._limit_peaks(prepared[0])
 
-        return ffmpeg.filter(
+        mixed = ffmpeg.filter(
             prepared,
             "amix",
             inputs=len(prepared),
             duration="longest",
             dropout_transition=0,
+            normalize=0,
         )
+        return self._limit_peaks(mixed)
 
     def merge(
         self,
@@ -216,13 +232,13 @@ class VideoMerger:
                 inputs=2,
                 duration="longest",
                 dropout_transition=0,
-            ).filter("apad")
+                normalize=0,
+            )
+            mixed_audio = self._limit_peaks(mixed_audio).filter("apad")
 
         else:
 
-            mixed_audio = commentary.filter(
-                "apad"
-            )
+            mixed_audio = commentary.filter("apad")
 
         output = ffmpeg.output(
             video.video,
